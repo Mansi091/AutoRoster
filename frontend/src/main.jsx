@@ -10,7 +10,7 @@ const clerkPublishableKey = import.meta.env.VITE_CLERK_PUBLISHABLE_KEY
 
 function ClerkSetupNotice() {
   return (
-    <main className="modal-overlay auth-required-overlay">
+    <main className="auth-required-overlay">
       <div className="auth-gate-layout">
         <div className="auth-brand-lockup"><span className="auth-brand-mark"><Bus size={22} /></span><span>AutoRoster</span></div>
         <section className="auth-required-card clerk-setup-notice">

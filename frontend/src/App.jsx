@@ -22,6 +22,10 @@ import {
   Shield,
   Clock3,
   ExternalLink,
+  Info,
+  ShieldCheck,
+  Route as RouteIcon,
+  Gauge,
 } from "lucide-react";
 import { exportToExcel } from "./utils/excel";
 import { computeFleetCost } from "./utils/fleetCost";
@@ -30,7 +34,6 @@ import RouteMap from "./components/RouteMap";
 import AuthModal from "./components/AuthModal";
 import HistoryPanel from "./components/HistoryPanel";
 import { recordRosterHistory, authenticatedFetch } from "./utils/clerk";
-import { readApiJson } from "./api/base";
 
 function adaptMultiShiftResponse(shifts, destination) {
   const routes = [];
@@ -207,15 +210,32 @@ export default function App() {
     const loadPlanningOptions = async () => {
       try {
         const response = await authenticatedFetch("/api/planning-options", {}, getToken);
-        const payload = await readApiJson(response);
-        if (!response.ok) throw new Error(payload.detail || payload.error || "Could not load shift times.");
-        const startTimes = payload.shift_start_times || {};
+        if (!response.ok) {
+          if (!cancelled) {
+            setShiftStartTimes({ A: "06:50", B: "14:50", C: "22:50" });
+            setArrivalBufferMinutes(10);
+          }
+          return;
+        }
+        const text = await response.text();
+        if (!text) {
+          if (!cancelled) {
+            setShiftStartTimes({ A: "06:50", B: "14:50", C: "22:50" });
+            setArrivalBufferMinutes(10);
+          }
+          return;
+        }
+        const payload = JSON.parse(text);
+        const startTimes = payload.shift_start_times || { A: "06:50", B: "14:50", C: "22:50" };
         if (!cancelled) {
           setShiftStartTimes(startTimes);
-          setArrivalBufferMinutes(Number(payload.arrival_buffer_minutes) || 0);
+          setArrivalBufferMinutes(Number(payload.arrival_buffer_minutes) || 10);
         }
-      } catch (error) {
-        if (!cancelled) setStatusMessage(`Error: ${error.message}`);
+      } catch {
+        if (!cancelled) {
+          setShiftStartTimes({ A: "06:50", B: "14:50", C: "22:50" });
+          setArrivalBufferMinutes(10);
+        }
       }
     };
     loadPlanningOptions();
@@ -295,7 +315,7 @@ export default function App() {
         signal: abortController.signal,
         }, planningAccessToken);
 
-      const data = await readApiJson(res);
+      const data = await res.json();
       if (!res.ok) throw new Error(data.error || data.detail || `Optimizer returned HTTP ${res.status}`);
       if (abortController.signal.aborted || activeUserIdRef.current !== planningUserId) return;
       if (data.status === "SUCCESS" && data.shifts) {
@@ -351,7 +371,7 @@ export default function App() {
           { signal: controller.signal },
           getToken,
         );
-        const payload = await readApiJson(res);
+        const payload = await res.json();
         if (!res.ok) throw new Error(payload.detail || "Location search is temporarily unavailable.");
         setDropoffCandidates(Array.isArray(payload) ? payload : []);
       } catch (err) {
@@ -387,19 +407,20 @@ export default function App() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       }, getToken);
-      const data = await readApiJson(res);
-      if (!res.ok) throw new Error(data.detail || data.error || "Could not confirm this drop-off facility.");
-      setConfirmedDropoff(data.dropoff);
-      setClustering(null);
-      setPlannedRosterFile(null);
-      setDestination({
-        name: data.dropoff.name,
-        lat: data.dropoff.lat,
-        lon: data.dropoff.lon,
-      });
-      setDropoffCandidates([]);
-      setDropoffSearchText("");
-      setShowDropoffModal(false);
+      if (res.ok) {
+        const data = await res.json();
+        setConfirmedDropoff(data.dropoff);
+        setClustering(null);
+        setPlannedRosterFile(null);
+        setDestination({
+          name: data.dropoff.name,
+          lat: data.dropoff.lat,
+          lon: data.dropoff.lon,
+        });
+        setDropoffCandidates([]);
+        setDropoffSearchText("");
+        setShowDropoffModal(false);
+      }
     } catch (err) {
       alert(`Could not confirm drop-off: ${err.message}`);
     } finally {
@@ -506,15 +527,56 @@ export default function App() {
     plannedShiftStartTimes && Object.keys(shiftStartTimes).some((shift) => plannedShiftStartTimes[shift] !== shiftStartTimes[shift])
   );
 
+  
+  const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
+  const shiftTimesValid = Object.keys(shiftStartTimes).length > 0 &&
+    Object.values(shiftStartTimes).every((time) => TIME_RE.test(time || ""));
+  const hasShiftChoice = Boolean(selectedTimeShift) && shiftTimesValid;
+
+  const setupSteps = [
+    { title: "Upload roster", hint: uploadedRosterFile ? uploadedRosterFile.name : "Excel .xlsx or .xls", done: Boolean(uploadedRosterFile) },
+    { title: "Drop-off facility", hint: destination ? destination.name : "Search and confirm", done: Boolean(destination) },
+    { title: "Shift and start time", hint: hasShiftChoice ? `Shift ${selectedTimeShift} · ${shiftStartTimes[selectedTimeShift]}` : "Pick a shift", done: hasShiftChoice },
+    { title: "Build routes", hint: canBuildRoutes ? "Ready when you are" : "Complete the steps first", done: false },
+  ];
+  const currentStepIndex = Math.max(0, setupSteps.findIndex((step) => !step.done));
+
+  const initials = (currentUser?.display_name || currentUser?.email || "S")
+    .split(/[\s@.]+/).filter(Boolean).slice(0, 2).map((part) => part[0]?.toUpperCase()).join("") || "S";
+
+  const showStart = !clustering && !isPlanning && activeTab !== "history";
+  const pageMeta = activeTab === "history"
+    ? { title: "Roster history", sub: "Plans you have saved, ready to download again." }
+    : !clustering
+      ? { title: "Plan employee transport", sub: "Upload a roster, confirm the drop-off and build routes." }
+      : activeTab === "routes"
+        ? { title: "Route review", sub: "Check journey times, then open a route to see its pickup list." }
+        : activeTab === "employees"
+          ? { title: "Employees", sub: "Everyone on the roster with their route and pickup stop." }
+          : { title: "Route map", sub: "Explore every bus route, stop and pickup on the map." };
+
+  const unverifiedCount = clustering ? clustering.employees.filter(
+    (e) => e.location_status === "LOCATION_UNVERIFIED" || e.assigned_bus.includes("Outlier")
+  ).length : 0;
+
+  const goTo = (tab) => { setActiveTab(tab); setMobileMenuOpen(false); };
+  const startNewRoster = () => fileInputRef.current?.click();
+
   if (!isLoaded || isSwitchingAccount) {
-    return <div className="auth-loading-screen"><span className="spinner" /> Checking supervisor session...</div>;
+    return <div className="auth-loading-screen"><span className="spinner" /> Checking supervisor session…</div>;
   }
 
   if (!isSignedIn) return <AuthModal />;
 
+  const navItems = [
+    { id: "map", label: "Route map", icon: MapPin, needsData: true },
+    { id: "routes", label: "Route review", icon: Bus, needsData: true, badge: clustering?.routes.length },
+    { id: "employees", label: "Employees", icon: Users, needsData: true, badge: clustering?.employees.length },
+    { id: "history", label: "Roster history", icon: History },
+  ];
+
   return (
     <div className="app-layout">
-      {/* Hidden file input */}
       <input
         type="file"
         ref={fileInputRef}
@@ -523,11 +585,11 @@ export default function App() {
         onChange={handleFileUpload}
       />
 
-      {/* Mobile Top Navigation */}
+      {/* Mobile top bar */}
       <header className="mobile-header">
         <div className="mobile-brand">
-          <Bus size={20} color="var(--primary)" />
-          <span>AutoRoster Transit</span>
+          <span className="brand-mark"><Bus size={16} /></span>
+          <span>AutoRoster</span>
         </div>
         <button
           type="button"
@@ -535,340 +597,273 @@ export default function App() {
           onClick={() => setMobileMenuOpen((prev) => !prev)}
           aria-label="Toggle navigation menu"
         >
-          {mobileMenuOpen ? <X size={20} /> : <Menu size={20} />}
+          {mobileMenuOpen ? <X size={18} /> : <Menu size={18} />}
         </button>
       </header>
 
-      {/* Sidebar Backdrop Overlay on Mobile */}
-      <div
-        className={`sidebar-backdrop ${mobileMenuOpen ? "open" : ""}`}
-        onClick={() => setMobileMenuOpen(false)}
-      />
+      <div className={`sidebar-backdrop ${mobileMenuOpen ? "open" : ""}`} onClick={() => setMobileMenuOpen(false)} />
 
-      {/* Sidebar Navigation */}
+      {/* Sidebar */}
       <aside className={`sidebar ${mobileMenuOpen ? "open" : ""}`}>
         <div className="sidebar-brand">
-          <h1 className="brand-title-simple">
-            <span className="brand-mark"><Bus size={20} /></span>
-            <span className="brand-name">AutoRoster</span>
-          </h1>
-          <button
-            type="button"
-            className="sidebar-close-btn"
-            onClick={() => setMobileMenuOpen(false)}
-            aria-label="Close sidebar"
-          >
-            <X size={18} />
+          <div className="brand">
+            <span className="brand-mark"><Bus size={19} /></span>
+            <span className="brand-text">
+              <span className="brand-name">AutoRoster</span>
+              <span className="brand-sub">Employee Transport</span>
+            </span>
+          </div>
+          <button type="button" className="sidebar-close-btn" onClick={() => setMobileMenuOpen(false)} aria-label="Close sidebar">
+            <X size={16} />
           </button>
         </div>
 
-        <nav className="sidebar-nav">
-          <button
-            className={`sidebar-tab-btn ${clustering && activeTab === "map" ? "active" : ""}`}
-            disabled={!clustering}
-            title={!clustering ? "Upload a roster to view routes" : "Interactive map"}
-            onClick={() => {
-              setActiveTab("map");
-              setMobileMenuOpen(false);
-            }}
-          >
-            <MapPin size={18} />
-            <span>Interactive Map</span>
-          </button>
-          <button
-            className={`sidebar-tab-btn ${clustering && activeTab === "routes" ? "active" : ""}`}
-            disabled={!clustering}
-            title={!clustering ? "Upload a roster to view routes" : "Optimized routes"}
-            onClick={() => {
-              setActiveTab("routes");
-              setMobileMenuOpen(false);
-            }}
-          >
-            <Bus size={18} />
-            <span>Optimized Routes</span>
-            {clustering && <span className="tab-badge">{clustering.routes.length}</span>}
-          </button>
-          <button
-            className={`sidebar-tab-btn ${clustering && activeTab === "employees" ? "active" : ""}`}
-            disabled={!clustering}
-            title={!clustering ? "Upload a roster to view employees" : "Employees"}
-            onClick={() => {
-              setActiveTab("employees");
-              setMobileMenuOpen(false);
-            }}
-          >
-            <Users size={18} />
-            <span>Employees</span>
-            {clustering && <span className="tab-badge">{clustering.employees.length}</span>}
-          </button>
-          <button
-            className={`sidebar-tab-btn ${activeTab === "history" ? "active" : ""}`}
-            onClick={() => {
-              setActiveTab("history");
-              setMobileMenuOpen(false);
-            }}
-          >
-            <History size={18} />
-            <span>Roster History</span>
-          </button>
-        </nav>
+        <div>
+          <div className="nav-label">Workspace</div>
+          <nav className="sidebar-nav">
+            {navItems.map(({ id, label, icon: Icon, needsData, badge }) => (
+              <button
+                key={id}
+                type="button"
+                className={`nav-item ${activeTab === id && (!needsData || clustering) ? "active" : ""}`}
+                disabled={needsData && !clustering}
+                title={needsData && !clustering ? "Build routes to unlock this view" : label}
+                onClick={() => goTo(id)}
+              >
+                <Icon size={18} />
+                <span>{label}</span>
+                {badge != null && <span className="nav-badge">{badge}</span>}
+              </button>
+            ))}
+          </nav>
+        </div>
 
-        {/* Sidebar Actions & Download */}
         <div className="sidebar-footer">
-          {/* Supervisor Auth Status */}
-          <div className="sidebar-auth-panel">
-            {currentUser && (
-              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-                  <span style={{ fontSize: "0.75rem", fontWeight: 700, color: "#16A34A", display: "flex", alignItems: "center", gap: 4 }}>
-                    <Shield size={12} /> SUPERVISOR
-                  </span>
-                  <button
-                    type="button"
-                    onClick={handleSignOut}
-                    style={{
-                      background: "none",
-                      border: "none",
-                      color: "#DC2626",
-                      fontSize: "0.72rem",
-                      fontWeight: 700,
-                      cursor: "pointer",
-                      display: "flex",
-                      alignItems: "center",
-                      gap: 3,
-                    }}
-                  >
-                    <LogOut size={12} /> Sign Out
-                  </button>
-                </div>
-                <div style={{ fontSize: "0.8rem", color: "#334155", fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={currentUser.email}>
-                  {currentUser.email}
-                </div>
+          {currentUser && (
+            <div className="user-card">
+              <span className="user-avatar">{initials}</span>
+              <div className="user-meta">
+                <strong title={currentUser.email}>{currentUser.display_name}</strong>
+                <span><ShieldCheck size={12} /> Supervisor</span>
               </div>
-            )}
-          </div>
-
-          {clustering && <>
-          <button
-            className="btn btn-secondary"
-            style={{ width: "100%", justifyContent: "center" }}
-            onClick={() => runOptimization()}
-            disabled={isOptimising}
-          >
-            <RefreshCw size={15} className={isOptimising ? "spin" : ""} />
-            <span>{isOptimising ? "Optimizing…" : "Re-Run Optimization"}</span>
-          </button>
-
-          <button
-            className="btn btn-primary sidebar-download-btn"
-            onClick={handleDownloadFinalExcel}
-            title="Download finalized multi-shift roster formatted strictly to Image 2 & 3"
-          >
-            <Download size={16} />
-            <span>Download Final Excel</span>
-          </button>
-          </>}
+              <button type="button" className="icon-btn" onClick={handleSignOut} title="Sign out" aria-label="Sign out">
+                <LogOut size={16} />
+              </button>
+            </div>
+          )}
         </div>
       </aside>
 
-      {/* Main Content Area */}
+      {/* Main */}
       <main className="main-content">
-        {/* Clean Drop-off Destination Bar */}
-        <div className="facility-toolbar">
-          <div className="facility-toolbar-main" style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-            {destination ? (
-              <>
-                <MapPin size={18} color="#2563EB" />
-                <span style={{ fontSize: "0.88rem", fontWeight: 700, color: "#1E293B" }}>
-                  Drop-off Facility:
-                </span>
-                <span style={{ fontSize: "0.88rem", color: "#475569" }}>
-                  {`${destination.name} (${destination.lat.toFixed(4)}, ${destination.lon.toFixed(4)})`}
-                </span>
-                <button
-                  className="btn btn-secondary btn-sm"
-                  onClick={openDropoffPicker}
-                  style={{ fontSize: "0.78rem", padding: "4px 10px", marginLeft: 4 }}
-                >
-                  <Search size={13} /> Change Drop-off
-                </button>
-              </>
-            ) : (
-              <button
-                className="btn btn-secondary btn-sm"
-                onClick={openDropoffPicker}
-                style={{ fontSize: "0.82rem", padding: "7px 12px" }}
-              >
-                <MapPin size={15} color="#2563EB" /> Choose drop-off facility
-              </button>
-            )}
-            {destination && Object.keys(shiftStartTimes).length > 0 && (
-              <div className="shift-deadline-controls">
-                <label className="shift-deadline-field">
-                  <span>Shift</span>
-                  <select
-                    value={selectedTimeShift}
-                    onChange={(event) => {
-                      setSelectedTimeShift(event.target.value);
-                      setStatusMessage("");
-                    }}
-                    disabled={isOptimising}
-                    aria-label="Select shift to set its start time"
-                  >
-                    <option value="">Select shift</option>
-                    {Object.keys(shiftStartTimes).sort().map((shift) => (
-                      <option key={shift} value={shift}>Shift {shift}</option>
-                    ))}
-                  </select>
-                </label>
-                <label className="shift-deadline-field">
-                  <span>Shift starts at</span>
-                  <input
-                    type="time"
-                    required
-                    value={shiftStartTimes[selectedTimeShift] || ""}
-                    onChange={(event) => {
-                      setShiftStartTimes((current) => ({
-                        ...current,
-                        [selectedTimeShift]: event.target.value,
-                      }));
-                      setStatusMessage("");
-                    }}
-                    disabled={isOptimising || !selectedTimeShift}
-                    aria-label={`Start time for Shift ${selectedTimeShift}`}
-                  />
-                </label>
-                {needsShiftTimeRerun && clustering && (
-                  <span className="shift-deadline-pending">Re-run to apply</span>
-                )}
-                <span className="shift-deadline-note">
-                  Routes arrive {arrivalBufferMinutes ?? 0} min before the selected shift starts.
-                </span>
-              </div>
-            )}
+        <div className="topbar">
+          <div>
+            <h1 className="page-title">{pageMeta.title}</h1>
+            <p className="page-sub">{pageMeta.sub}</p>
           </div>
-
-          <div className="facility-toolbar-actions" style={{ display: "flex", alignItems: "center", gap: 10 }}>
-            {clustering && (
-              <button
-                className="btn btn-secondary"
-                onClick={() => fileInputRef.current?.click()}
-                style={{ display: "flex", alignItems: "center", gap: 6 }}
-              >
-                <Upload size={15} /> Upload New Roster
+          {clustering && activeTab !== "history" && (
+            <div className="topbar-actions">
+              <button type="button" className="btn btn-secondary" onClick={startNewRoster}>
+                <Upload size={15} /> New roster
               </button>
-            )}
-          </div>
+              <button type="button" className="btn btn-secondary" onClick={() => runOptimization()} disabled={isOptimising}>
+                <RefreshCw size={15} className={isOptimising ? "spin" : ""} />
+                {isOptimising ? "Optimizing…" : "Re-run"}
+              </button>
+              <button type="button" className="btn btn-primary" onClick={handleDownloadFinalExcel}>
+                <Download size={15} /> Download Excel
+              </button>
+            </div>
+          )}
         </div>
 
-        {statusMessage.startsWith("Error:") && !isPlanning && (
-          <div className="route-error-banner" role="alert">{statusMessage}</div>
-        )}
-
-        {!clustering && !isPlanning && activeTab !== "history" && (
-          <section className="roster-upload-start">
-            <div className="roster-upload-heading">
-              <span className="roster-upload-eyebrow"><span /> ROUTE PLANNING</span>
-              <h2>Plan employee transport</h2>
-              <p>Upload an employee roster to begin route planning.</p>
+        {activeTab !== "history" && (
+          <section className="setup-bar" aria-label="Planning setup">
+            <div className="setup-field setup-field--facility">
+              <span className={`setup-icon ${destination ? "" : "is-empty"}`}><MapPin size={18} /></span>
+              <div className="setup-text">
+                <span className="setup-label">Drop-off facility</span>
+                <strong title={destination?.name}>{destination ? destination.name : "Not chosen yet"}</strong>
+                {destination && <small>{destination.lat.toFixed(4)}, {destination.lon.toFixed(4)}</small>}
+              </div>
+              <button type="button" className="btn btn-soft btn-sm" onClick={openDropoffPicker}>
+                <Search size={13} /> {destination ? "Change" : "Choose"}
+              </button>
             </div>
-            <div className="roster-upload-grid">
-              <div
-                className={`roster-dropzone ${isRosterDragOver ? "is-dragging" : ""}`}
-                onDragOver={(event) => { event.preventDefault(); setIsRosterDragOver(true); }}
-                onDragLeave={(event) => {
-                  if (!event.currentTarget.contains(event.relatedTarget)) setIsRosterDragOver(false);
-                }}
-                onDrop={(event) => {
-                  event.preventDefault();
-                  setIsRosterDragOver(false);
-                  const file = event.dataTransfer.files?.[0];
-                  if (file) {
-                    if (!/\.xlsx?$/i.test(file.name)) {
-                      setStatusMessage("Error: Choose an .xlsx or .xls file.");
-                    } else {
-                      setUploadedRosterFile(file);
-                      setSelectedTimeShift("");
-                      setStatusMessage("");
-                    }
-                  }
-                }}
-                onClick={() => fileInputRef.current?.click()}
-                role="button"
-                tabIndex={0}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter" || event.key === " ") {
-                    event.preventDefault();
-                    fileInputRef.current?.click();
-                  }
-                }}
-              >
-                <div className="roster-upload-icon"><FileText size={24} /></div>
-                <h3>Drop your Excel roster here</h3>
-                <p>or <span>browse files</span> on your computer</p>
-                <div className="roster-dropzone-meta">
-                  <span><CheckCircle2 size={14} /> Excel workbook</span>
-                  <span>.XLSX or .XLS</span>
+
+            {destination && Object.keys(shiftStartTimes).length > 0 && (
+              <>
+                <label className="setup-field">
+                  <div className="setup-stack">
+                    <span className="setup-label">Shift</span>
+                    <select
+                      className="select-field"
+                      value={selectedTimeShift}
+                      onChange={(event) => { setSelectedTimeShift(event.target.value); setStatusMessage(""); }}
+                      disabled={isOptimising}
+                      aria-label="Select shift to set its start time"
+                    >
+                      <option value="">Select shift</option>
+                      {Object.keys(shiftStartTimes).sort().map((shift) => (
+                        <option key={shift} value={shift}>Shift {shift}</option>
+                      ))}
+                    </select>
+                  </div>
+                </label>
+                <label className="setup-field">
+                  <div className="setup-stack">
+                    <span className="setup-label">Shift starts at</span>
+                    <input
+                      type="time"
+                      required
+                      className="input-field"
+                      value={shiftStartTimes[selectedTimeShift] || ""}
+                      onChange={(event) => {
+                        setShiftStartTimes((current) => ({ ...current, [selectedTimeShift]: event.target.value }));
+                        setStatusMessage("");
+                      }}
+                      disabled={isOptimising || !selectedTimeShift}
+                      aria-label={`Start time for Shift ${selectedTimeShift}`}
+                    />
+                  </div>
+                  {needsShiftTimeRerun && clustering && <span className="pill pill-warn">Re-run to apply</span>}
+                </label>
+                <div className="setup-note">
+                  <Info size={15} />
+                  Routes arrive {arrivalBufferMinutes ?? 0} min before the selected shift starts.
                 </div>
-              </div>
-            </div>
+              </>
+            )}
           </section>
         )}
 
-        {hasPendingRoster && !isPlanning && activeTab !== "history" && (
-          <section className="roster-upload-ready" aria-label="Build routes from selected roster">
-            <div className="roster-upload-ready-file">
-              <span className="roster-upload-ready-icon"><FileText size={18} /></span>
-              <div>
-                <strong title={uploadedRosterFile.name}>{uploadedRosterFile.name}</strong>
-                <span>
-                  {!destination
-                    ? "Choose a drop-off facility to continue."
-                    : !Object.keys(shiftStartTimes).length
-                      ? "Loading shift options…"
-                      : !selectedTimeShift
-                        ? "Select a shift to review its start time."
-                        : !Object.values(shiftStartTimes).every((time) => /^([01]\d|2[0-3]):[0-5]\d$/.test(time || ""))
-                          ? "Enter a valid start time for every shift."
-                          : "Roster ready to plan."}
-                </span>
-              </div>
-            </div>
-            <button
-              type="button"
-              className="btn btn-primary roster-build-button"
-              onClick={() => runOptimization()}
-              disabled={!canBuildRoutes}
+        {statusMessage.startsWith("Error:") && !isPlanning && (
+          <div className="banner banner-error" role="alert">
+            <AlertTriangle size={16} />
+            <div>{statusMessage}</div>
+          </div>
+        )}
+        {statusMessage && !statusMessage.startsWith("Error:") && !isPlanning && (
+          <div className="banner banner-warn" role="status">
+            <Info size={16} />
+            <div>{statusMessage}</div>
+          </div>
+        )}
+
+        {/* Start state */}
+        {showStart && (
+          <section className="start">
+            <ol className="stepper" aria-label="Planning steps">
+              {setupSteps.map((step, index) => (
+                <li
+                  key={step.title}
+                  className={`step ${step.done ? "is-done" : ""} ${index === currentStepIndex ? "is-current" : ""}`}
+                >
+                  <span className="step-dot">{step.done ? <Check size={14} /> : index + 1}</span>
+                  <span className="step-text">
+                    <strong>{step.title}</strong>
+                    <small title={step.hint}>{step.hint}</small>
+                  </span>
+                </li>
+              ))}
+            </ol>
+
+            <div
+              className={`dropzone ${isRosterDragOver ? "is-dragging" : ""} ${uploadedRosterFile ? "is-compact" : ""}`}
+              onDragOver={(event) => { event.preventDefault(); setIsRosterDragOver(true); }}
+              onDragLeave={(event) => {
+                if (!event.currentTarget.contains(event.relatedTarget)) setIsRosterDragOver(false);
+              }}
+              onDrop={(event) => {
+                event.preventDefault();
+                setIsRosterDragOver(false);
+                const file = event.dataTransfer.files?.[0];
+                if (file) {
+                  if (!/\.xlsx?$/i.test(file.name)) {
+                    setStatusMessage("Error: Choose an .xlsx or .xls file.");
+                  } else {
+                    setUploadedRosterFile(file);
+                    setSelectedTimeShift("");
+                    setStatusMessage("");
+                  }
+                }
+              }}
+              onClick={startNewRoster}
+              role="button"
+              tabIndex={0}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" || event.key === " ") {
+                  event.preventDefault();
+                  startNewRoster();
+                }
+              }}
             >
-              <Bus size={16} /> Build routes
-            </button>
+              <div className="dropzone-icon"><FileText size={uploadedRosterFile ? 20 : 26} /></div>
+              <div>
+                <h3>{uploadedRosterFile ? "Replace the roster file" : "Drop your Excel roster here"}</h3>
+                <p>or <span>browse files</span> on your computer</p>
+                {!uploadedRosterFile && (
+                  <div className="dropzone-meta">
+                    <span className="pill pill-teal"><CheckCircle2 size={12} /> Excel workbook</span>
+                    <span className="pill">.xlsx · .xls</span>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {hasPendingRoster && (
+              <section className="ready-card" aria-label="Build routes from selected roster">
+                <div className="ready-file">
+                  <span className="ready-icon"><FileText size={19} /></span>
+                  <div>
+                    <strong title={uploadedRosterFile.name}>{uploadedRosterFile.name}</strong>
+                    <span className={canBuildRoutes ? "is-ready" : ""}>
+                      {!destination
+                        ? "Choose a drop-off facility to continue."
+                        : !Object.keys(shiftStartTimes).length
+                          ? "Loading shift options…"
+                          : !selectedTimeShift
+                            ? "Select a shift to review its start time."
+                            : !shiftTimesValid
+                              ? "Enter a valid start time for every shift."
+                              : "Roster ready to plan."}
+                    </span>
+                  </div>
+                </div>
+                <div className="ready-actions">
+                  <button type="button" className="btn btn-ghost" onClick={() => setUploadedRosterFile(null)}>Remove</button>
+                  <button type="button" className="btn btn-primary" onClick={() => runOptimization()} disabled={!canBuildRoutes}>
+                    <RouteIcon size={16} /> Build routes
+                  </button>
+                </div>
+              </section>
+            )}
+
+
           </section>
         )}
 
-        {/* Drop-off location search */}
+        {/* Drop-off picker */}
         {showDropoffModal && (
           <div className="modal-overlay" onClick={() => setShowDropoffModal(false)}>
-            <div className="modal-container dropoff-search-modal" onClick={(event) => event.stopPropagation()}>
+            <div className="modal-container" onClick={(event) => event.stopPropagation()} role="dialog" aria-modal="true" aria-label="Choose drop-off facility">
               <div className="modal-header">
-                <div className="modal-title-group">
-                  <h3 className="modal-title"><MapPin size={19} color="#536b82" /> Choose drop-off facility</h3>
-                </div>
-                <button type="button" className="modal-close-btn" onClick={() => setShowDropoffModal(false)} aria-label="Close search">
+                <h3 className="modal-title">
+                  <span className="modal-title-icon"><MapPin size={17} /></span> Choose drop-off facility
+                </h3>
+                <button type="button" className="icon-btn" onClick={() => setShowDropoffModal(false)} aria-label="Close search">
                   <X size={18} />
                 </button>
               </div>
 
-              <div className="modal-body dropoff-search-body">
+              <div className="modal-body">
                 <div className="dropoff-search-field">
                   <Search size={17} />
                   <input
                     type="text"
                     placeholder="Search a place or paste a Google Maps link"
                     value={dropoffSearchText}
-                    onChange={(event) => {
-                      setDropoffSearchText(event.target.value);
-                      setDropoffCandidates([]);
-                    }}
+                    onChange={(event) => { setDropoffSearchText(event.target.value); setDropoffCandidates([]); }}
                     autoFocus
                     aria-label="Search for a drop-off facility"
                   />
@@ -902,7 +897,7 @@ export default function App() {
                       </article>
                     ))
                   ) : isSearchingDropoff ? (
-                    <div className="dropoff-search-message">Searching places...</div>
+                    <div className="dropoff-search-message">Searching places…</div>
                   ) : dropoffSearchText.trim().length >= 2 ? (
                     <div className="dropoff-search-message">
                       <span>No places found.</span>
@@ -922,23 +917,14 @@ export default function App() {
           </div>
         )}
 
-        {/* Compact progress state while the backend builds routes */}
+        {/* Planning in progress */}
         {isPlanning && (
           <section className="planning-page" role="status" aria-live="polite">
-            <div className="planning-card">
-              <div className="planning-card-topline">
-                <span className="planning-state-label">
-                  <span className="planning-live-indicator" />
-                  In progress
-                </span>
-              </div>
+            <div className="card planning-card">
+              <span className="planning-state"><span className="planning-live" /> In progress</span>
               <h2>Optimizing routes</h2>
-              <p className="planning-description">Assigning employees and calculating road travel times.</p>
-
-              <div className="planning-progress-track" role="progressbar" aria-label="Route optimization in progress" aria-valuetext="In progress">
-                <span />
-              </div>
-
+              <p className="planning-desc">Assigning employees and calculating road travel times. This can take a little while for large rosters.</p>
+              <div className="progress-track" role="progressbar" aria-label="Route optimization in progress" aria-valuetext="In progress"><span /></div>
               <div className="planning-details">
                 <div className="planning-detail">
                   <span>Roster</span>
@@ -956,17 +942,17 @@ export default function App() {
           </section>
         )}
 
-        {/* KPI Summary Cards */}
-        {clustering && (
+        {/* KPIs */}
+        {clustering && activeTab !== "history" && (
           <div className="kpi-row">
-            <article className="kpi-card kpi-card--employees">
-              <div className="kpi-card-head">
+            <article className="kpi-card kpi--employees">
+              <div className="kpi-head">
                 <span className="kpi-title">Employees</span>
-                <span className="kpi-icon"><Users size={17} /></span>
+                <span className="kpi-icon"><Users size={16} /></span>
               </div>
               <div className="kpi-main">
                 <span className="kpi-number">{clustering.total_employees}</span>
-                <span className="kpi-unit">employees</span>
+                <span className="kpi-unit">total</span>
               </div>
               <div
                 className="kpi-meter"
@@ -980,15 +966,15 @@ export default function App() {
                 <span style={{ width: `${assignmentRate}%` }} />
               </div>
               <div className={`kpi-detail ${clustering.unverified_employees ? "is-warning" : "is-good"}`}>
-                {clustering.routed_employees} of {clustering.total_employees} assigned
-                {clustering.unverified_employees > 0 && <span> · {clustering.unverified_employees} need review</span>}
+                {clustering.routed_employees} assigned
+                {clustering.unverified_employees > 0 && ` · ${clustering.unverified_employees} need review`}
               </div>
             </article>
 
-            <article className="kpi-card kpi-card--fleet">
-              <div className="kpi-card-head">
+            <article className="kpi-card kpi--routes">
+              <div className="kpi-head">
                 <span className="kpi-title">Planned routes</span>
-                <span className="kpi-icon"><Bus size={18} /></span>
+                <span className="kpi-icon"><Bus size={16} /></span>
               </div>
               <div className="kpi-main">
                 <span className="kpi-number">{clustering.total_buses}</span>
@@ -997,30 +983,42 @@ export default function App() {
               <div className="kpi-detail">Across shifts · fleet not assigned</div>
             </article>
 
-            <article className="kpi-card kpi-card--stops">
-              <div className="kpi-card-head">
-                <span className="kpi-title">Route stops</span>
-                <span className="kpi-icon"><MapPin size={17} /></span>
+            <article className="kpi-card kpi--stops">
+              <div className="kpi-head">
+                <span className="kpi-title">Pickup stops</span>
+                <span className="kpi-icon"><MapPin size={16} /></span>
               </div>
               <div className="kpi-main">
                 <span className="kpi-number">{clustering.total_stops}</span>
                 <span className="kpi-unit">stops</span>
               </div>
-              <div className="kpi-detail">Stops counted across all shifts</div>
+              <div className="kpi-detail">Counted across all shifts</div>
             </article>
 
-            <article className={`kpi-card kpi-card--time ${longestRoute && Number(longestRoute.longest_ride_minutes) > 70 ? "has-alert" : ""}`}>
-              <div className="kpi-card-head">
+            <article className="kpi-card kpi--km">
+              <div className="kpi-head">
+                <span className="kpi-title">Fleet distance</span>
+                <span className="kpi-icon"><Gauge size={16} /></span>
+              </div>
+              <div className="kpi-main">
+                <span className="kpi-number">{clustering.total_fleet_km}</span>
+                <span className="kpi-unit">km</span>
+              </div>
+              <div className="kpi-detail">Sum of all route distances</div>
+            </article>
+
+            <article className={`kpi-card kpi--time ${longestRoute && Number(longestRoute.longest_ride_minutes) > 70 ? "has-alert" : ""}`}>
+              <div className="kpi-head">
                 <span className="kpi-title">Longest ride</span>
-                <span className="kpi-icon"><Clock3 size={17} /></span>
+                <span className="kpi-icon"><Clock3 size={16} /></span>
               </div>
               <div className="kpi-main">
                 <span className="kpi-number">
-                  {longestRoute ? Number(longestRoute.longest_ride_minutes).toFixed(1) : "—"}
+                  {longestRoute && Number.isFinite(Number(longestRoute.longest_ride_minutes)) ? Number(longestRoute.longest_ride_minutes).toFixed(1) : "—"}
                 </span>
                 <span className="kpi-unit">min</span>
               </div>
-              <div className="kpi-detail">
+              <div className="kpi-detail" title={longestRoute?.bus_id}>
                 {longestRoute
                   ? `${longestRoute.bus_id}${Number(longestRoute.longest_ride_minutes) > 70 ? ` · ${Math.round(Number(longestRoute.longest_ride_minutes) - 70)} min over limit` : " · highest route time"}`
                   : "No routes available"}
@@ -1029,36 +1027,18 @@ export default function App() {
           </div>
         )}
 
-        {/* TAB 1: INTERACTIVE ROUTE MAP */}
+        {/* Map */}
         {activeTab === "map" && clustering && (
           <div className="map-workspace">
             {hoveredEmployee && (
-              <div
-                style={{
-                  background: "#F8FAFC",
-                  border: "1px solid #E2E8F0",
-                  borderRadius: 8,
-                  padding: "8px 14px",
-                  marginBottom: 10,
-                  display: "flex",
-                  justifyContent: "space-between",
-                  alignItems: "center",
-                }}
-              >
+              <div className="inspect-bar">
                 <div>
-                  <span style={{ fontWeight: 700, color: "var(--primary)" }}>
-                    Inspecting: {hoveredEmployee.employee_name}
-                  </span>
-                  <span style={{ color: "var(--text-secondary)", marginLeft: 10, fontSize: "0.82rem" }}>
-                    Pickup: <b>{hoveredEmployee.pickup_point}</b> &rarr; Assigned: <b>{hoveredEmployee.assigned_bus}</b> ({hoveredEmployee.shift})
+                  <strong>Inspecting: {hoveredEmployee.employee_name}</strong>
+                  <span>
+                    Pickup <b>{hoveredEmployee.pickup_point}</b> &rarr; <b>{hoveredEmployee.assigned_bus}</b> ({hoveredEmployee.shift})
                   </span>
                 </div>
-                <button
-                  className="btn btn-secondary btn-sm"
-                  onClick={() => setHoveredEmployee(null)}
-                >
-                  Clear Selection
-                </button>
+                <button className="btn btn-secondary btn-sm" onClick={() => setHoveredEmployee(null)}>Clear selection</button>
               </div>
             )}
 
@@ -1072,64 +1052,48 @@ export default function App() {
           </div>
         )}
 
-        {/* TAB 2: BUS ROUTES GRID */}
+        {/* Route review */}
         {activeTab === "routes" && clustering && (
           <section className="route-review-page">
-            <header className="route-review-heading">
-              <div>
-                <h2>Review routes</h2>
-                <p>Check journey times, then open a route to see its pickup list.</p>
-              </div>
-              <span className="route-count-pill">{clustering.routes.length} routes</span>
-            </header>
-
             {routesNeedingReview.length > 0 ? (
-              <div className="route-review-alert" role="status">
-                <span className="route-review-alert-icon"><Clock3 size={17} /></span>
+              <div className="banner banner-warn" role="status">
+                <Clock3 size={17} />
                 <div>
                   <strong>{routesNeedingReview.length} {routesNeedingReview.length === 1 ? "route is" : "routes are"} over 70 minutes</strong>
                   <span>Review the flagged journeys before approving the roster.</span>
                 </div>
               </div>
             ) : (
-              <div className="route-review-clear" role="status">
-                <Check size={17} /> All route estimates are within 70 minutes.
+              <div className="banner banner-ok" role="status">
+                <CheckCircle2 size={17} /> All route estimates are within 70 minutes.
               </div>
             )}
 
             <div className="route-filter-row">
-              <div className="route-shift-filter" aria-label="Filter routes by shift">
-                <span>Show</span>
-                {["ALL", "A", "B", "C"].map((s) => (
-                  <button
-                    key={s}
-                    type="button"
-                    className={`route-shift-option ${shiftFilter === s ? "active" : ""}`}
-                    aria-pressed={shiftFilter === s}
-                    onClick={() => setShiftFilter(s)}
-                  >
-                    {s === "ALL" ? "All shifts" : `Shift ${s}`}
-                  </button>
-                ))}
+              <div className="route-filter-left">
+                <div className="seg" aria-label="Filter routes by shift">
+                  {["ALL", "A", "B", "C"].map((s) => (
+                    <button
+                      key={s}
+                      type="button"
+                      className={`seg-btn ${shiftFilter === s ? "active" : ""}`}
+                      aria-pressed={shiftFilter === s}
+                      onClick={() => setShiftFilter(s)}
+                    >
+                      {s === "ALL" ? "All shifts" : `Shift ${s}`}
+                    </button>
+                  ))}
+                </div>
+                <select className="select-field" value={corridorFilter} onChange={(e) => setCorridorFilter(e.target.value)} aria-label="Filter by pickup area">
+                  {["ALL", ...Array.from(new Set(clustering.routes.map((r) => r.corridor).filter(Boolean)))].map((c) => (
+                    <option key={c} value={c}>{c === "ALL" ? "All pickup areas" : c}</option>
+                  ))}
+                </select>
               </div>
-              <details className="route-more-filters">
-                <summary>More filters</summary>
-                <label>
-                  Pickup area
-                  <select
-                    className="select-field"
-                    value={corridorFilter}
-                    onChange={(e) => setCorridorFilter(e.target.value)}
-                  >
-                    {["ALL", ...Array.from(new Set(clustering.routes.map((r) => r.corridor).filter(Boolean)))].map((c) => (
-                      <option key={c} value={c}>{c === "ALL" ? "All pickup areas" : c}</option>
-                    ))}
-                  </select>
-                </label>
-              </details>
+              <span className="pill pill-accent">{clustering.routes.length} routes</span>
             </div>
 
-            <div className="routes-grid route-review-grid">
+            <div className="route-review-grid">
               {clustering.routes
                 .filter((r) => shiftFilter === "ALL" || r.shift.includes(shiftFilter))
                 .filter((r) => corridorFilter === "ALL" || r.corridor === corridorFilter)
@@ -1140,21 +1104,22 @@ export default function App() {
                   const isOverLimit = Number.isFinite(rideMinutes) && rideMinutes > 70;
                   const stopCount = route.stops?.length || 0;
                   const passengerCount = Number(route.passengers_assigned) || 0;
+                  const loadPct = Math.min(100, Math.round((passengerCount / 32) * 100));
                   return (
-                    <article key={route.bus_id} className={`route-card route-review-card ${isOverLimit ? "needs-review" : ""}`}>
-                      <div className="route-review-card-head">
-                        <div className="route-review-name">
+                    <article key={route.bus_id} className={`route-card ${isOverLimit ? "needs-review" : ""}`}>
+                      <div className="route-card-head">
+                        <div className="route-card-title">
                           <span className="route-number">Route {route.route_no}</span>
-                          <span className="route-shift-tag">Shift {route.shift}</span>
+                          <span className="pill pill-accent">Shift {route.shift}</span>
+                          <span className={`pill ${Number.isFinite(rideMinutes) ? (isOverLimit ? "pill-warn" : "pill-ok") : ""}`}>
+                            {Number.isFinite(rideMinutes) ? (isOverLimit ? "Needs review" : "Within limit") : "Time unavailable"}
+                          </span>
                         </div>
-                        <span className={`route-status-tag ${isOverLimit ? "warning" : "good"}`}>
-                          {Number.isFinite(rideMinutes) ? (isOverLimit ? "Needs review" : "Within limit") : "Time unavailable"}
-                        </span>
                         <p className="route-corridor">{route.corridor}</p>
                       </div>
 
-                      <div className="route-review-card-body">
-                        <div className="route-review-stats">
+                      <div className="route-card-body">
+                        <div className="route-stats">
                           <div><span>First pickup</span><strong>{route.first_pickup_time || "—"}</strong></div>
                           <div><span>At facility</span><strong>{route.plant_arrival_time || "—"}</strong></div>
                           <div className={isOverLimit ? "over-limit" : ""}>
@@ -1163,22 +1128,29 @@ export default function App() {
                           </div>
                         </div>
 
-                        <div className="route-review-footer">
-                          <span>{passengerCount} of 32 seats · {stopCount} pickup {stopCount === 1 ? "stop" : "stops"}</span>
+                        <div className="load-row">
+                          <div className="load-text">
+                            <span><strong>{passengerCount}</strong> of 32 seats</span>
+                            <span>{stopCount} pickup {stopCount === 1 ? "stop" : "stops"}</span>
+                          </div>
+                          <div className={`load-bar ${loadPct >= 95 ? "is-full" : ""}`}><span style={{ width: `${loadPct}%` }} /></div>
+                        </div>
+
+                        <div className="route-actions">
                           <button
                             type="button"
                             className="route-map-link"
-                            onClick={() => {
-                              setActiveTab("map");
-                              setSelectedBusId(route.bus_id);
-                            }}
+                            onClick={() => { setActiveTab("map"); setSelectedBusId(route.bus_id); }}
                           >
-                            View on map <MapPin size={14} />
+                            <MapPin size={14} /> View on map
+                          </button>
+                          <button type="button" className="btn btn-ghost btn-sm" onClick={() => handleRoutePdf(route)}>
+                            <FileText size={13} /> PDF
                           </button>
                         </div>
 
                         <details className="route-stops-disclosure">
-                          <summary>View pickup list</summary>
+                          <summary>Pickup list</summary>
                           <div className="route-stop-list">
                             {(route.stops || []).map((st) => (
                               <div key={st.seq} className="route-stop-row">
@@ -1193,10 +1165,7 @@ export default function App() {
                                 <button
                                   type="button"
                                   aria-label={`Show ${st.stop_name} on map`}
-                                  onClick={() => {
-                                    setActiveTab("map");
-                                    setSelectedBusId(route.bus_id);
-                                  }}
+                                  onClick={() => { setActiveTab("map"); setSelectedBusId(route.bus_id); }}
                                 >
                                   <MapPin size={14} />
                                 </button>
@@ -1212,98 +1181,103 @@ export default function App() {
           </section>
         )}
 
-        {/* TAB 3: EMPLOYEES ROSTER TABLE */}
+        {/* Employees */}
         {activeTab === "employees" && clustering && (
           <div className="table-panel">
             <div className="table-filter-bar">
-              <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+              <div className="table-filter-left">
                 <div className="table-summary">
                   <strong>{filteredEmployees.length}</strong> of <strong>{clustering.employees.length}</strong> employees
                 </div>
                 <div className="seg">
                   {["ALL", "A", "B", "C"].map((s) => (
-                    <button
-                      key={s}
-                      className={`seg-btn ${shiftFilter === s ? "active" : ""}`}
-                      onClick={() => setShiftFilter(s)}
-                    >
-                      {s === "ALL" ? "All Shifts" : `Shift ${s}`}
+                    <button key={s} className={`seg-btn ${shiftFilter === s ? "active" : ""}`} onClick={() => setShiftFilter(s)}>
+                      {s === "ALL" ? "All shifts" : `Shift ${s}`}
                     </button>
                   ))}
                 </div>
+                <div className="seg">
+                  <button className={`seg-btn ${employeeStatusFilter === "ALL" ? "active" : ""}`} onClick={() => setEmployeeStatusFilter("ALL")}>
+                    Everyone
+                  </button>
+                  <button className={`seg-btn ${employeeStatusFilter === "UNVERIFIED" ? "active" : ""}`} onClick={() => setEmployeeStatusFilter("UNVERIFIED")}>
+                    Needs review{unverifiedCount > 0 ? ` (${unverifiedCount})` : ""}
+                  </button>
+                </div>
               </div>
-              <input
-                type="text"
-                className="search-box"
-                placeholder="Search employee, stop, or bus..."
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-              />
+              <div className="search-wrap">
+                <Search size={15} />
+                <input
+                  type="text"
+                  className="search-box"
+                  placeholder="Search employee, stop, or route…"
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                />
+              </div>
             </div>
 
             <div className="table-scroll">
-              <table className="custom-table">
-                <thead>
-                  <tr>
-                    <th>Emp ID</th>
-                    <th>Name</th>
-                    <th>Grade</th>
-                    <th>Shift</th>
-                    <th>Assigned Route</th>
-                    <th>Pickup Stop</th>
-                    <th>Mobile</th>
-                    <th>Action</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {filteredEmployees.map((e, idx) => (
-                    <tr key={idx}>
-                      <td>#{e.employee_id}</td>
-                      <td style={{ fontWeight: 600 }}>{e.employee_name}</td>
-                      <td>{e.grade}</td>
-                      <td>
-                        <span className="badge-seats">{e.shift}</span>
-                      </td>
-                      <td>
-                        <span className="bus-badge" style={{ fontWeight: 600 }}>
-                          {e.assigned_bus}
-                        </span>
-                      </td>
-                      <td>{e.pickup_point}</td>
-                      <td style={{ fontFamily: "monospace", color: "var(--text-muted)" }}>
-                        {e.mobile || "-"}
-                      </td>
-                      <td>
-                        {e.latitude && e.longitude ? (
-                          <button
-                            className="btn btn-secondary btn-sm"
-                            onClick={() => {
-                              setHoveredEmployee(e);
-                              setActiveTab("map");
-                            }}
-                          >
-                            <Crosshair size={12} /> View Map
-                          </button>
-                        ) : (
-                          <span style={{ fontSize: "0.75rem", color: "#DC2626", fontWeight: 600 }}>
-                            Outlier / Review
-                          </span>
-                        )}
-                      </td>
+              {filteredEmployees.length === 0 ? (
+                <div className="empty-state">
+                  <span className="empty-icon"><Users size={24} /></span>
+                  <h4>No employees match</h4>
+                  <p>Try a different shift, clear the search or switch the review filter.</p>
+                </div>
+              ) : (
+                <table className="custom-table">
+                  <thead>
+                    <tr>
+                      <th>Emp ID</th>
+                      <th>Name</th>
+                      <th>Grade</th>
+                      <th>Shift</th>
+                      <th>Assigned route</th>
+                      <th>Pickup stop</th>
+                      <th>Mobile</th>
+                      <th>Action</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
+                  </thead>
+                  <tbody>
+                    {filteredEmployees.map((e, idx) => (
+                      <tr key={idx}>
+                        <td className="cell-mono">#{e.employee_id}</td>
+                        <td className="cell-strong">{e.employee_name}</td>
+                        <td className="cell-muted">{e.grade}</td>
+                        <td><span className="pill pill-accent">{e.shift}</span></td>
+                        <td>
+                          {e.assigned_bus.includes("Outlier")
+                            ? <span className="pill pill-bad" title={e.resolution_reason}>{e.assigned_bus}</span>
+                            : <span className="pill pill-teal">{e.assigned_bus}</span>}
+                        </td>
+                        <td>{e.pickup_point}</td>
+                        <td className="cell-mono">{e.mobile || "-"}</td>
+                        <td>
+                          {e.latitude && e.longitude ? (
+                            <button
+                              className="btn btn-secondary btn-sm"
+                              onClick={() => { setHoveredEmployee(e); setActiveTab("map"); }}
+                            >
+                              <Crosshair size={12} /> View on map
+                            </button>
+                          ) : (
+                            <span className="pill pill-bad" title={e.resolution_reason}>Outlier / review</span>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
             </div>
           </div>
         )}
 
-        {/* TAB 4: THIS SUPERVISOR'S ROSTER HISTORY */}
+        {/* History */}
         {activeTab === "history" && (
           <HistoryPanel currentUser={currentUser} getToken={getToken} />
         )}
       </main>
-
     </div>
   );
 }
