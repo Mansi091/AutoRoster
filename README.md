@@ -76,6 +76,14 @@ Open http://localhost:5173. Vite proxies /api requests to the backend on port 50
 
 Use the root .env for backend-only values. Use frontend/.env only for frontend values.
 
+### Deploying the frontend and API
+
+- Deploy the `frontend` directory as the Vercel project root using the Vite build command `npm run build` and output directory `dist`.
+- Set `VITE_API_BASE_URL` in Vercel to the public FastAPI origin, for example `https://your-render-service.onrender.com`. Set it for each Vercel environment you use, then create a new deployment so Vite includes it in the frontend bundle.
+- In the Render API service, set `FRONTEND_ORIGINS` to the exact Vercel site origin (scheme and hostname, no path or trailing slash). Add the same origin to `CLERK_AUTHORIZED_PARTIES` so the API accepts session tokens issued to that frontend.
+- Keep `CLERK_SECRET_KEY`, `GOOGLE_MAPS_API_KEY`, and Supabase service credentials in Render's backend environment only. Do not add them to Vercel.
+- Redeploy the Render service after changing backend environment values. `/api/health` checks service availability; an authenticated endpoint such as `/api/planning-options` verifies that the frontend-to-backend path and Clerk setup work.
+
 ### Clerk
 
 Create a Clerk application and use its Development keys locally:

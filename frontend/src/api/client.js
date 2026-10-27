@@ -4,20 +4,22 @@
  * Dedicated HTTP client providing clean methods for all transit planning endpoints.
  */
 
+import { apiUrl, readApiJson } from "./base";
+
 export async function checkHealth() {
-  const res = await fetch("/api/health");
+  const res = await fetch(apiUrl("/api/health"));
   if (!res.ok) throw new Error(`Health check failed: HTTP ${res.status}`);
-  return await res.json();
+  return await readApiJson(res);
 }
 
 export async function loadCurrentRoster() {
-  const res = await fetch("/api/load_current");
+  const res = await fetch(apiUrl("/api/load_current"));
   if (!res.ok) throw new Error(`Failed to load current roster: HTTP ${res.status}`);
-  return await res.json();
+  return await readApiJson(res);
 }
 
 export async function optimizeRoutes(employees, options = {}) {
-  const res = await fetch("/api/optimize_all", {
+  const res = await fetch(apiUrl("/api/optimize_all"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -28,11 +30,11 @@ export async function optimizeRoutes(employees, options = {}) {
     }),
   });
   if (!res.ok) throw new Error(`Optimization failed: HTTP ${res.status}`);
-  return await res.json();
+  return await readApiJson(res);
 }
 
 export async function resolveSingleStop(stopName, lat = null, lon = null) {
-  const res = await fetch("/api/resolve_single", {
+  const res = await fetch(apiUrl("/api/resolve_single"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -42,11 +44,11 @@ export async function resolveSingleStop(stopName, lat = null, lon = null) {
     }),
   });
   if (!res.ok) throw new Error(`Failed to resolve stop: HTTP ${res.status}`);
-  return await res.json();
+  return await readApiJson(res);
 }
 
 export async function exportExcelWorkbook(routes, employees, unverifiedEmployees = []) {
-  const res = await fetch("/api/export_excel", {
+  const res = await fetch(apiUrl("/api/export_excel"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({

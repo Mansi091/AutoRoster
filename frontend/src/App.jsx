@@ -30,6 +30,7 @@ import RouteMap from "./components/RouteMap";
 import AuthModal from "./components/AuthModal";
 import HistoryPanel from "./components/HistoryPanel";
 import { recordRosterHistory, authenticatedFetch } from "./utils/clerk";
+import { readApiJson } from "./api/base";
 
 function adaptMultiShiftResponse(shifts, destination) {
   const routes = [];
@@ -206,7 +207,7 @@ export default function App() {
     const loadPlanningOptions = async () => {
       try {
         const response = await authenticatedFetch("/api/planning-options", {}, getToken);
-        const payload = await response.json();
+        const payload = await readApiJson(response);
         if (!response.ok) throw new Error(payload.detail || payload.error || "Could not load shift times.");
         const startTimes = payload.shift_start_times || {};
         if (!cancelled) {
@@ -294,7 +295,7 @@ export default function App() {
         signal: abortController.signal,
         }, planningAccessToken);
 
-      const data = await res.json();
+      const data = await readApiJson(res);
       if (!res.ok) throw new Error(data.error || data.detail || `Optimizer returned HTTP ${res.status}`);
       if (abortController.signal.aborted || activeUserIdRef.current !== planningUserId) return;
       if (data.status === "SUCCESS" && data.shifts) {
@@ -350,7 +351,7 @@ export default function App() {
           { signal: controller.signal },
           getToken,
         );
-        const payload = await res.json();
+        const payload = await readApiJson(res);
         if (!res.ok) throw new Error(payload.detail || "Location search is temporarily unavailable.");
         setDropoffCandidates(Array.isArray(payload) ? payload : []);
       } catch (err) {
@@ -386,20 +387,19 @@ export default function App() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       }, getToken);
-      if (res.ok) {
-        const data = await res.json();
-        setConfirmedDropoff(data.dropoff);
-        setClustering(null);
-        setPlannedRosterFile(null);
-        setDestination({
-          name: data.dropoff.name,
-          lat: data.dropoff.lat,
-          lon: data.dropoff.lon,
-        });
-        setDropoffCandidates([]);
-        setDropoffSearchText("");
-        setShowDropoffModal(false);
-      }
+      const data = await readApiJson(res);
+      if (!res.ok) throw new Error(data.detail || data.error || "Could not confirm this drop-off facility.");
+      setConfirmedDropoff(data.dropoff);
+      setClustering(null);
+      setPlannedRosterFile(null);
+      setDestination({
+        name: data.dropoff.name,
+        lat: data.dropoff.lat,
+        lon: data.dropoff.lon,
+      });
+      setDropoffCandidates([]);
+      setDropoffSearchText("");
+      setShowDropoffModal(false);
     } catch (err) {
       alert(`Could not confirm drop-off: ${err.message}`);
     } finally {

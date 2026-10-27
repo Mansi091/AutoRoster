@@ -77,6 +77,16 @@ class AppConfig:
     SEED_DIR: Path = SEED_DIR
     OUTPUT_DIR: Path = OUTPUT_DIR
 
+    # Comma-separated browser origins allowed to call the API.
+    FRONTEND_ORIGINS: list[str] = [
+        origin.strip().rstrip("/")
+        for origin in os.getenv(
+            "FRONTEND_ORIGINS",
+            "http://localhost:5173,http://127.0.0.1:5173",
+        ).split(",")
+        if origin.strip()
+    ]
+
     # Plant & Facility
     FACILITY: FacilityConfig = FacilityConfig()
 
