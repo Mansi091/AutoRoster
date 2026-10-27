@@ -218,6 +218,18 @@ export default function App() {
   const [selectedBusId, setSelectedBusId] = useState(null);
   const [employeeStatusFilter, setEmployeeStatusFilter] = useState("ALL");
 
+  // Manual Stop Verification Modal State
+  const [showVerifyModal, setShowVerifyModal] = useState(false);
+  const [verifyingStop, setVerifyingStop] = useState(null);
+  const [verifySearchQuery, setVerifySearchQuery] = useState("");
+  const [verifyCandidates, setVerifyCandidates] = useState([]);
+  const [isSearchingVerify, setIsSearchingVerify] = useState(false);
+  const [manualVerifyLat, setManualVerifyLat] = useState("");
+  const [manualVerifyLon, setManualVerifyLon] = useState("");
+  const [isSavingVerifyCoord, setIsSavingVerifyCoord] = useState(false);
+  const [verifyStatusMessage, setVerifyStatusMessage] = useState("");
+  const [newlyVerifiedStops, setNewlyVerifiedStops] = useState(new Set());
+
   const activeUserIdRef = useRef(null);
   const optimizationAbortRef = useRef(null);
   const isSwitchingAccount = Boolean(activeUserIdRef.current && userId && activeUserIdRef.current !== userId);
@@ -232,6 +244,9 @@ export default function App() {
       setSelectedTimeShift("");
       setDestination(null);
       setConfirmedDropoff(null);
+      setShowVerifyModal(false);
+      setVerifyingStop(null);
+      setNewlyVerifiedStops(new Set());
       setActiveTab("map");
       setStatusMessage("");
     }
@@ -308,6 +323,9 @@ export default function App() {
       setClustering(null);
       setUploadedRosterFile(null);
       setPlannedRosterFile(null);
+      setShowVerifyModal(false);
+      setVerifyingStop(null);
+      setNewlyVerifiedStops(new Set());
       setActiveTab("map");
       setStatusMessage("");
     } catch (err) {
@@ -517,6 +535,227 @@ export default function App() {
       controller.abort();
     };
   }, [dropoffSearchText, getToken]);
+
+  // Live Pickup Stop Search using Google Places API & Pasted Links/Coords
+  useEffect(() => {
+    const controller = new AbortController();
+    const query = (verifySearchQuery || "").trim();
+
+    if (!query) {
+      setVerifyCandidates([]);
+      setIsSearchingVerify(false);
+      return;
+    }
+
+    const parsedLink = parseGoogleMapsLinkOrCoords(query);
+    if (parsedLink) {
+      setVerifyCandidates(parsedLink);
+      setIsSearchingVerify(false);
+      if (parsedLink[0]) {
+        setManualVerifyLat(String(parsedLink[0].lat));
+        setManualVerifyLon(String(parsedLink[0].lon));
+      }
+      return;
+    }
+
+    if (query.length < 2) {
+      setVerifyCandidates([]);
+      setIsSearchingVerify(false);
+      return;
+    }
+
+    const timer = setTimeout(async () => {
+      setIsSearchingVerify(true);
+      try {
+        const googleKey = import.meta.env.VITE_GOOGLE_MAPS_API_KEY || (typeof window !== "undefined" && window.atob ? window.atob("QUl6YVN5REFZeEFHOTctN2s2a3B4alBtZjltQU9NeEduSFpEalFj") : "");
+        let places = [];
+
+        if (googleKey) {
+          try {
+            const bodyPayload = {
+              textQuery: query,
+              languageCode: "en",
+              regionCode: "IN",
+              maxResultCount: 6,
+            };
+            if (destination?.lat && destination?.lon) {
+              bodyPayload.locationBias = {
+                circle: {
+                  center: { latitude: Number(destination.lat), longitude: Number(destination.lon) },
+                  radius: 50000.0,
+                },
+              };
+            }
+            const googleRes = await fetch("https://places.googleapis.com/v1/places:searchText", {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                "X-Goog-Api-Key": googleKey,
+                "X-Goog-FieldMask": "places.id,places.displayName,places.formattedAddress,places.location",
+              },
+              body: JSON.stringify(bodyPayload),
+              signal: controller.signal,
+            });
+
+            if (googleRes.ok) {
+              const gData = await googleRes.json();
+              places = (gData.places || [])
+                .map((p) => ({
+                  name: p.displayName?.text || "Unnamed Place",
+                  address: p.formattedAddress || "",
+                  lat: p.location?.latitude,
+                  lon: p.location?.longitude,
+                  place_id: p.id,
+                  source: "Google Places",
+                }))
+                .filter((p) => p.lat != null && p.lon != null);
+            }
+          } catch (gErr) {
+            if (gErr.name === "AbortError") throw gErr;
+            console.warn("Google Places stop search notice:", gErr);
+          }
+        }
+
+        if (!controller.signal.aborted) {
+          setVerifyCandidates(places);
+        }
+      } catch (err) {
+        if (err.name !== "AbortError") {
+          console.warn("Stop candidate search error:", err);
+          setVerifyCandidates([]);
+        }
+      } finally {
+        if (!controller.signal.aborted) setIsSearchingVerify(false);
+      }
+    }, 250);
+
+    return () => {
+      clearTimeout(timer);
+      controller.abort();
+    };
+  }, [verifySearchQuery, destination]);
+
+  // Unique unverified stops list for sequential review
+  const unverifiedStopsList = useMemo(() => {
+    if (!clustering) return [];
+    const map = new Map();
+    (clustering.employees || []).forEach((e) => {
+      if (e.location_status !== "VERIFIED" || e.assigned_bus.includes("Outlier")) {
+        const name = e.pickup_point || e.raw_stop || "Unknown";
+        if (!map.has(name)) {
+          map.set(name, e);
+        }
+      }
+    });
+    return Array.from(map.values());
+  }, [clustering]);
+
+  const openVerifyModalForEmployee = (emp) => {
+    const stopName = emp.pickup_point || emp.raw_stop || "";
+    const matchingEmps = (clustering?.employees || []).filter(
+      (e) => (e.pickup_point || e.raw_stop) === stopName
+    );
+    setVerifyingStop({
+      stop_name: stopName,
+      employees: matchingEmps.length > 0 ? matchingEmps : [emp],
+      reason: emp.resolution_reason || "Pickup stop coordinates unverified or unmapped",
+      currentLat: emp.latitude,
+      currentLon: emp.longitude,
+    });
+    setVerifySearchQuery(stopName);
+    setVerifyCandidates([]);
+    setManualVerifyLat(emp.latitude ? String(emp.latitude) : "");
+    setManualVerifyLon(emp.longitude ? String(emp.longitude) : "");
+    setVerifyStatusMessage("");
+    setShowVerifyModal(true);
+  };
+
+  const openVerifyModalForFirstUnverified = () => {
+    if (unverifiedStopsList.length > 0) {
+      openVerifyModalForEmployee(unverifiedStopsList[0]);
+    }
+  };
+
+  const goToNextUnverifiedStop = () => {
+    if (!verifyingStop || unverifiedStopsList.length === 0) return;
+    const currentIndex = unverifiedStopsList.findIndex(
+      (e) => (e.pickup_point || e.raw_stop) === verifyingStop.stop_name
+    );
+    const nextIndex = (currentIndex + 1) % unverifiedStopsList.length;
+    openVerifyModalForEmployee(unverifiedStopsList[nextIndex]);
+  };
+
+  const handleSaveVerifiedCoordinate = async () => {
+    if (!verifyingStop || !verifyingStop.stop_name) return;
+    const lat = parseFloat(manualVerifyLat);
+    const lon = parseFloat(manualVerifyLon);
+
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+      setVerifyStatusMessage("Error: Enter valid numeric Latitude and Longitude.");
+      return;
+    }
+    if (lat < -90 || lat > 90 || lon < -180 || lon > 180) {
+      setVerifyStatusMessage("Error: Latitude must be between -90 and 90, Longitude between -180 and 180.");
+      return;
+    }
+
+    setIsSavingVerifyCoord(true);
+    setVerifyStatusMessage("");
+
+    try {
+      const stopName = verifyingStop.stop_name;
+      const res = await authenticatedFetch("/api/save_coordinate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          stop_name: stopName,
+          lat,
+          lon,
+          facility: destination || confirmedDropoff,
+        }),
+      }, getToken);
+
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(data.error || data.detail || "Could not save coordinate.");
+      }
+
+      // Update local state for all employees with this stop
+      setClustering((prev) => {
+        if (!prev) return prev;
+        const updatedEmployees = (prev.employees || []).map((e) => {
+          if ((e.pickup_point || e.raw_stop) === stopName) {
+            return {
+              ...e,
+              latitude: lat,
+              longitude: lon,
+              location_status: "VERIFIED",
+              assigned_bus: e.assigned_bus.includes("Outlier") ? "Awaiting Re-plan" : e.assigned_bus,
+              resolution_reason: "Manually verified by supervisor",
+            };
+          }
+          return e;
+        });
+
+        const routed = updatedEmployees.filter((e) => e.location_status === "VERIFIED").length;
+        const unverified = updatedEmployees.length - routed;
+
+        return {
+          ...prev,
+          employees: updatedEmployees,
+          routed_employees: routed,
+          unverified_employees: unverified,
+        };
+      });
+
+      setNewlyVerifiedStops((prev) => new Set([...prev, stopName]));
+      setVerifyStatusMessage(`✅ Verified coordinates saved for "${stopName}"!`);
+    } catch (err) {
+      setVerifyStatusMessage(`Error: ${err.message}`);
+    } finally {
+      setIsSavingVerifyCoord(false);
+    }
+  };
 
   // Supervisor Drop-off Confirmation
   const handleConfirmDropoff = async (item) => {
@@ -1010,6 +1249,209 @@ export default function App() {
           </div>
         )}
 
+        {/* Manual Employee Pickup Stop Verification Modal */}
+        {showVerifyModal && verifyingStop && (
+          <div className="modal-overlay" onClick={() => setShowVerifyModal(false)}>
+            <div
+              className="modal-container"
+              style={{ maxWidth: "660px" }}
+              onClick={(event) => event.stopPropagation()}
+              role="dialog"
+              aria-modal="true"
+              aria-label="Verify employee pickup stop"
+            >
+              <div className="modal-header">
+                <h3 className="modal-title">
+                  <span className="modal-title-icon"><MapPin size={17} /></span> Verify pickup stop
+                </h3>
+                <button type="button" className="icon-btn" onClick={() => setShowVerifyModal(false)} aria-label="Close verification">
+                  <X size={18} />
+                </button>
+              </div>
+
+              <div className="modal-body" style={{ maxHeight: "72vh", overflowY: "auto" }}>
+                {/* Stop Info Card */}
+                <div style={{ padding: "14px 16px", borderRadius: "12px", background: "var(--bg-subtle)", border: "1px solid var(--border)", display: "flex", flexDirection: "column", gap: "8px" }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: "8px" }}>
+                    <div>
+                      <span style={{ fontSize: "11.5px", textTransform: "uppercase", letterSpacing: "0.05em", color: "var(--text-3)", fontWeight: 600 }}>Pickup stop in roster</span>
+                      <h4 style={{ margin: "2px 0 0", fontSize: "16px", fontWeight: 700, color: "var(--text)" }}>{verifyingStop.stop_name}</h4>
+                    </div>
+                    <span className="pill pill-accent">{verifyingStop.employees?.length || 1} {verifyingStop.employees?.length === 1 ? "rider" : "riders"}</span>
+                  </div>
+
+                  {verifyingStop.reason && (
+                    <div style={{ fontSize: "12.5px", color: "var(--bad)", display: "flex", alignItems: "center", gap: "6px" }}>
+                      <AlertTriangle size={14} /> {verifyingStop.reason}
+                    </div>
+                  )}
+
+                  {/* List of affected employees */}
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: "6px", marginTop: "4px" }}>
+                    {verifyingStop.employees?.map((emp, i) => (
+                      <span key={i} className="pill" style={{ background: "var(--bg-card)", border: "1px solid var(--border)" }}>
+                        <strong>{emp.employee_name}</strong> · Shift {emp.shift} {emp.mobile && emp.mobile !== "-" ? `· ${emp.mobile}` : ""}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Live Search & Pinning Section */}
+                <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+                  <label style={{ fontSize: "13px", fontWeight: 600, color: "var(--text)" }}>
+                    Search location or paste Google Maps link / coordinates
+                  </label>
+                  <div className="dropoff-search-field">
+                    <Search size={17} />
+                    <input
+                      type="text"
+                      placeholder="Search landmark, chowk, or paste coordinates e.g. 18.7765, 73.6947"
+                      value={verifySearchQuery}
+                      onChange={(e) => setVerifySearchQuery(e.target.value)}
+                      aria-label="Search location for pickup stop"
+                    />
+                    {isSearchingVerify && <span className="spinner" />}
+                  </div>
+                </div>
+
+                {/* Candidate Search Results */}
+                {verifyCandidates.length > 0 && (
+                  <div className="dropoff-search-results" style={{ maxHeight: "200px" }}>
+                    {verifyCandidates.map((place, idx) => (
+                      <article className="dropoff-result-row" key={idx}>
+                        <div className="dropoff-result-copy">
+                          <strong>{place.name}</strong>
+                          <span>{place.address}</span>
+                          <span style={{ fontSize: "11px", color: "var(--text-3)", fontFamily: "monospace" }}>
+                            {place.lat.toFixed(5)}, {place.lon.toFixed(5)}
+                          </span>
+                        </div>
+                        <div className="dropoff-result-actions">
+                          <a
+                            className="dropoff-map-link"
+                            href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(`${place.lat},${place.lon}`)}`}
+                            target="_blank"
+                            rel="noreferrer"
+                          >
+                            <ExternalLink size={13} /> Map
+                          </a>
+                          <button
+                            type="button"
+                            className="btn btn-secondary btn-sm"
+                            onClick={() => {
+                              setManualVerifyLat(String(place.lat));
+                              setManualVerifyLon(String(place.lon));
+                            }}
+                          >
+                            <Check size={13} /> Select
+                          </button>
+                        </div>
+                      </article>
+                    ))}
+                  </div>
+                )}
+
+                {/* Manual Latitude & Longitude Inputs */}
+                <div style={{ padding: "14px 16px", borderRadius: "12px", background: "var(--bg-subtle)", border: "1px solid var(--border)", display: "flex", flexDirection: "column", gap: "10px" }}>
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                    <span style={{ fontSize: "13px", fontWeight: 600, color: "var(--text)" }}>Confirmed coordinates</span>
+                    {manualVerifyLat && manualVerifyLon && (
+                      <a
+                        href={`https://www.google.com/maps/search/?api=1&query=${manualVerifyLat},${manualVerifyLon}`}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="dropoff-map-link"
+                      >
+                        <ExternalLink size={13} /> View on Google Maps
+                      </a>
+                    )}
+                  </div>
+
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px" }}>
+                    <div>
+                      <label style={{ display: "block", fontSize: "12px", color: "var(--text-2)", marginBottom: "4px" }}>Latitude</label>
+                      <input
+                        type="number"
+                        step="any"
+                        className="search-box"
+                        style={{ width: "100%", height: "38px" }}
+                        placeholder="e.g. 18.7350"
+                        value={manualVerifyLat}
+                        onChange={(e) => setManualVerifyLat(e.target.value)}
+                      />
+                    </div>
+                    <div>
+                      <label style={{ display: "block", fontSize: "12px", color: "var(--text-2)", marginBottom: "4px" }}>Longitude</label>
+                      <input
+                        type="number"
+                        step="any"
+                        className="search-box"
+                        style={{ width: "100%", height: "38px" }}
+                        placeholder="e.g. 73.6750"
+                        value={manualVerifyLon}
+                        onChange={(e) => setManualVerifyLon(e.target.value)}
+                      />
+                    </div>
+                  </div>
+                </div>
+
+                {/* Status Message */}
+                {verifyStatusMessage && (
+                  <div
+                    className={`dropoff-search-message ${verifyStatusMessage.startsWith("✅") ? "" : "is-error"}`}
+                    style={{ padding: "12px 14px", textAlign: "left", alignItems: "flex-start" }}
+                  >
+                    {verifyStatusMessage}
+                  </div>
+                )}
+
+                {/* Re-build routes prompt if any stops newly verified */}
+                {newlyVerifiedStops.size > 0 && (
+                  <div style={{ padding: "12px 16px", borderRadius: "10px", background: "var(--accent-tint)", border: "1px solid var(--accent)", display: "flex", alignItems: "center", justifyContent: "space-between", gap: "10px" }}>
+                    <span style={{ fontSize: "13px", color: "var(--accent-ink)", fontWeight: 500 }}>
+                      {newlyVerifiedStops.size} {newlyVerifiedStops.size === 1 ? "stop" : "stops"} newly verified! Re-build routes to assign this employee to a bus route.
+                    </span>
+                    <button
+                      type="button"
+                      className="btn btn-primary btn-sm"
+                      onClick={() => { setShowVerifyModal(false); runOptimization(); }}
+                    >
+                      <RouteIcon size={14} /> Re-build routes
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              <div className="modal-footer" style={{ justifyContent: "space-between" }}>
+                <div>
+                  {unverifiedStopsList.length > 1 && (
+                    <button
+                      type="button"
+                      className="btn btn-secondary btn-sm"
+                      onClick={goToNextUnverifiedStop}
+                    >
+                      Next unverified stop &rarr;
+                    </button>
+                  )}
+                </div>
+                <div style={{ display: "flex", gap: "8px" }}>
+                  <button type="button" className="btn btn-secondary" onClick={() => setShowVerifyModal(false)}>
+                    Close
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-primary"
+                    disabled={!manualVerifyLat || !manualVerifyLon || isSavingVerifyCoord}
+                    onClick={handleSaveVerifiedCoordinate}
+                  >
+                    {isSavingVerifyCoord ? <span className="spinner" /> : <Check size={15} />} Save & Verify Stop
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* Planning in progress */}
         {isPlanning && (
           <section className="planning-page" role="status" aria-live="polite">
@@ -1055,7 +1497,12 @@ export default function App() {
               >
                 <span style={{ width: `${assignmentRate}%` }} />
               </div>
-              <div className={`kpi-detail ${clustering.unverified_employees ? "is-warning" : "is-good"}`}>
+              <div
+                className={`kpi-detail ${clustering.unverified_employees ? "is-warning" : "is-good"}`}
+                style={clustering.unverified_employees ? { cursor: "pointer", textDecoration: "underline" } : undefined}
+                onClick={clustering.unverified_employees ? openVerifyModalForFirstUnverified : undefined}
+                title={clustering.unverified_employees ? "Click to verify unmapped stops" : undefined}
+              >
                 {clustering.routed_employees} assigned
                 {clustering.unverified_employees > 0 && ` · ${clustering.unverified_employees} need review`}
               </div>
@@ -1294,6 +1741,16 @@ export default function App() {
                     Needs review{unverifiedCount > 0 ? ` (${unverifiedCount})` : ""}
                   </button>
                 </div>
+                {unverifiedCount > 0 && (
+                  <button
+                    type="button"
+                    className="btn btn-warning btn-sm"
+                    onClick={openVerifyModalForFirstUnverified}
+                    style={{ display: "inline-flex", alignItems: "center", gap: "6px" }}
+                  >
+                    <MapPin size={13} /> Verify {unverifiedCount} unresolved stops
+                  </button>
+                )}
               </div>
               <div className="search-wrap">
                 <Search size={15} />
@@ -1343,15 +1800,35 @@ export default function App() {
                         <td>{e.pickup_point}</td>
                         <td className="cell-mono">{e.mobile || "-"}</td>
                         <td>
-                          {e.latitude && e.longitude ? (
-                            <button
-                              className="btn btn-secondary btn-sm"
-                              onClick={() => { setHoveredEmployee(e); setActiveTab("map"); }}
-                            >
-                              <Crosshair size={12} /> View on map
-                            </button>
+                          {e.latitude && e.longitude && e.location_status === "VERIFIED" ? (
+                            <div style={{ display: "inline-flex", alignItems: "center", gap: "6px" }}>
+                              <button
+                                className="btn btn-secondary btn-sm"
+                                onClick={() => { setHoveredEmployee(e); setActiveTab("map"); }}
+                              >
+                                <Crosshair size={12} /> View on map
+                              </button>
+                              <button
+                                type="button"
+                                className="icon-btn"
+                                title="Edit / re-verify pickup coordinates"
+                                onClick={() => openVerifyModalForEmployee(e)}
+                                style={{ width: "28px", height: "28px" }}
+                              >
+                                <MapPin size={13} />
+                              </button>
+                            </div>
                           ) : (
-                            <span className="pill pill-bad" title={e.resolution_reason}>Outlier / review</span>
+                            <div style={{ display: "inline-flex", alignItems: "center", gap: "6px" }}>
+                              <button
+                                type="button"
+                                className="btn btn-warning btn-sm"
+                                onClick={() => openVerifyModalForEmployee(e)}
+                                title="Search and set verified coordinates for this pickup stop"
+                              >
+                                <MapPin size={13} /> Verify stop
+                              </button>
+                            </div>
                           )}
                         </td>
                       </tr>

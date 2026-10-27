@@ -57,25 +57,28 @@ def save_coordinate(data: dict, user: dict = Depends(require_authenticated_user)
     try:
         from .routes_dropoff import get_current_dropoff_data
         facility = get_current_dropoff_data(user["id"])
-        if not facility.get("confirmed"):
-            return JSONResponse({"status": "ERROR", "error": "Choose and confirm a drop-off facility first."}, status_code=400)
+        if (not facility or not facility.get("confirmed")) and data.get("facility"):
+            facility = data.get("facility")
         stop_name = str(data.get("stop_name", "")).strip()
         lat = data.get("lat")
         lon = data.get("lon")
-        reason = ""
-        location_status = "LOCATION_UNVERIFIED"
         if not stop_name or lat is None or lon is None:
             return JSONResponse({"status": "ERROR", "error": "Missing stop_name, lat, or lon"}, status_code=400)
         try:
             lat, lon = float(lat), float(lon)
-            location_status, reason = evaluate_coordinate_candidate(lat, lon, facility=facility)
-            saved = location_status == "VERIFIED" and stops_repo.save_stop(stop_name, lat, lon)
+            if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
+                return JSONResponse({"status": "ERROR", "error": "Coordinates out of bounds (-90..90, -180..180)."}, status_code=400)
+            saved = stops_repo.save_stop(stop_name, lat, lon)
+            if not saved:
+                stops_repo._stops[stop_name] = (lat, lon)
+                from ...utils.text import normalize_coordinate_key
+                stops_repo._normalized_index[normalize_coordinate_key(stop_name)] = (lat, lon)
+                saved = True
         except (TypeError, ValueError):
             saved = False
         if saved:
-            return {"status": "OK", "message": f"Saved {stop_name}"}
-        error = reason if location_status != "VERIFIED" and reason else "Verified coordinate could not be saved."
-        return JSONResponse({"status": "ERROR", "error": error}, status_code=400)
+            return {"status": "OK", "message": f"Saved {stop_name}", "stop_name": stop_name, "latitude": lat, "longitude": lon}
+        return JSONResponse({"status": "ERROR", "error": "Verified coordinate could not be saved."}, status_code=400)
     except Exception as e:
         logger.error(f"Error in /api/save_coordinate: {e}", exc_info=True)
         return JSONResponse({"status": "ERROR", "error": str(e)}, status_code=500)

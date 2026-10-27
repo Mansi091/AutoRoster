@@ -1,3 +1,11 @@
+// Route all relative /api/* calls through the correct backend.
+//
+// Local dev:   VITE_BACKEND_URL is not set → Vite proxy forwards /api/* to localhost:5000
+// Production:  VITE_BACKEND_URL is not set → vercel.json rewrites /api/* to https://autoroster.onrender.com
+//
+// If VITE_BACKEND_URL is explicitly set (e.g. for staging), it overrides both.
+const BACKEND_URL = (import.meta.env.VITE_BACKEND_URL || "").replace(/\/$/, "");
+
 export async function authenticatedFetch(url, options = {}, tokenSource) {
   let token = null;
   if (tokenSource) {
@@ -12,7 +20,12 @@ export async function authenticatedFetch(url, options = {}, tokenSource) {
   if (token) {
     headers.set("Authorization", `Bearer ${token}`);
   }
-  return fetch(url, { ...options, headers });
+
+  // Prepend backend URL only if explicitly configured. In production the
+  // vercel.json rewrite transparently forwards /api/* to Render.
+  const fullUrl = BACKEND_URL && url.startsWith("/") ? `${BACKEND_URL}${url}` : url;
+
+  return fetch(fullUrl, { ...options, headers });
 }
 
 export async function fetchRosterHistory(getToken) {
