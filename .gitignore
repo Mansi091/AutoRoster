@@ -1,0 +1,62 @@
+﻿# Secrets and local configuration
+.env
+.env.*
+!.env.example
+**/.env
+**/.env.*
+!**/.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+ENV/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# JavaScript
+node_modules/
+**/node_modules/
+frontend/dist/
+frontend/dist-ssr/
+
+# Local data, employee files, and generated workbooks
+settings.json
+data/input/
+**/data/input/
+data/manual/
+**/data/manual/
+data/cache/
+**/data/cache/
+data/dropoff_locations/
+**/data/dropoff_locations/
+data/dropoff_location.json
+**/data/dropoff_location.json
+data/login_logs.json
+data/roster_history.json
+data/supervisors.json
+data/stop_master.xlsx
+output/
+**/output/
+*.xlsx
+*.xls
+*.xlsm
+*.log
+
+# Local experiments
+scratch_*.py
+calc_*.py
+autonomous_cleaner.py
+
+# Editors and operating systems
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini

@@ -1,0 +1,9 @@
+pandas>=2.0
+openpyxl>=3.1
+requests>=2.31
+python-dotenv>=1.0
+fastapi>=0.100
+uvicorn[standard]>=0.23
+python-multipart>=0.0.6
+ortools>=9.8
+clerk-backend-api>=7.0.0
