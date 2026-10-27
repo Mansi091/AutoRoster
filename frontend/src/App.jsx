@@ -397,17 +397,23 @@ export default function App() {
         setPlannedShiftStartTimes({ ...shiftStartTimes });
         setStatusMessage("");
 
-        // Save this run to the signed-in supervisor's private history.
+        // Save this run to local client cache & supervisor history
         try {
-          await recordRosterHistory({
+          const localKey = planningUserId ? `roster_history_${planningUserId}` : "roster_history_cached";
+          const newRecord = data.history_record || {
+            id: `run_${Date.now()}`,
             uploaded_file_name: file.name,
             total_employees: adapted.total_employees,
             routed_employees: adapted.routed_employees,
             total_routes: adapted.routes.length,
             destination_name: facility.name || "",
-            shifts_summary: data.shifts || [],
+            workbook_filename: data.excel_filename || "FINAL_OPTIMIZED_BUS_ROSTER.xlsx",
             created_at: new Date().toISOString(),
-          }, getToken);
+          };
+          const prev = JSON.parse(localStorage.getItem(localKey) || "[]");
+          const updated = [newRecord, ...prev.filter((r) => r.id !== newRecord.id && r.workbook_filename !== newRecord.workbook_filename)];
+          localStorage.setItem(localKey, JSON.stringify(updated));
+          await recordRosterHistory(newRecord, getToken);
         } catch (historyError) {
           console.warn("Could not archive roster history:", historyError);
         }

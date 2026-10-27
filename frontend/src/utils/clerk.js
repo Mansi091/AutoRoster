@@ -49,10 +49,16 @@ export async function fetchRosterHistory(getToken) {
 }
 
 export async function recordRosterHistory(record, getToken) {
-  const response = await authenticatedFetch("/api/history/save", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(record),
-  }, getToken);
-  if (!response.ok) throw new Error("The plan was created, but its private history could not be saved.");
+  try {
+    const response = await authenticatedFetch("/api/history/save", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(record),
+    }, getToken);
+    if (!response.ok) return null;
+    return await response.json();
+  } catch (err) {
+    console.warn("Could not sync history record with backend:", err);
+    return null;
+  }
 }

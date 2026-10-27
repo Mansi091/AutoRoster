@@ -57,28 +57,25 @@ def save_coordinate(data: dict, user: dict = Depends(require_authenticated_user)
     try:
         from .routes_dropoff import get_current_dropoff_data
         facility = get_current_dropoff_data(user["id"])
-        if (not facility or not facility.get("confirmed")) and data.get("facility"):
-            facility = data.get("facility")
+        if not facility.get("confirmed"):
+            return JSONResponse({"status": "ERROR", "error": "Choose and confirm a drop-off facility first."}, status_code=400)
         stop_name = str(data.get("stop_name", "")).strip()
         lat = data.get("lat")
         lon = data.get("lon")
+        reason = ""
+        location_status = "LOCATION_UNVERIFIED"
         if not stop_name or lat is None or lon is None:
             return JSONResponse({"status": "ERROR", "error": "Missing stop_name, lat, or lon"}, status_code=400)
         try:
             lat, lon = float(lat), float(lon)
-            if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
-                return JSONResponse({"status": "ERROR", "error": "Coordinates out of bounds (-90..90, -180..180)."}, status_code=400)
-            saved = stops_repo.save_stop(stop_name, lat, lon)
-            if not saved:
-                stops_repo._stops[stop_name] = (lat, lon)
-                from ...utils.text import normalize_coordinate_key
-                stops_repo._normalized_index[normalize_coordinate_key(stop_name)] = (lat, lon)
-                saved = True
+            location_status, reason = evaluate_coordinate_candidate(lat, lon, facility=facility)
+            saved = location_status == "VERIFIED" and stops_repo.save_stop(stop_name, lat, lon)
         except (TypeError, ValueError):
             saved = False
         if saved:
-            return {"status": "OK", "message": f"Saved {stop_name}", "stop_name": stop_name, "latitude": lat, "longitude": lon}
-        return JSONResponse({"status": "ERROR", "error": "Verified coordinate could not be saved."}, status_code=400)
+            return {"status": "OK", "message": f"Saved {stop_name}"}
+        error = reason if location_status != "VERIFIED" and reason else "Verified coordinate could not be saved."
+        return JSONResponse({"status": "ERROR", "error": error}, status_code=400)
     except Exception as e:
         logger.error(f"Error in /api/save_coordinate: {e}", exc_info=True)
         return JSONResponse({"status": "ERROR", "error": str(e)}, status_code=500)
@@ -179,45 +176,36 @@ async def plan_multi_shift(request: Request, user: dict = Depends(require_authen
                 status_code=400,
             )
 
+        saved_dropoff = get_current_dropoff_data(user["id"])
         try:
             submitted_dropoff = json.loads(str(form.get("dropoff") or ""))
             submitted_lat = float(submitted_dropoff["lat"])
             submitted_lon = float(submitted_dropoff["lon"])
-            facility_name = str(submitted_dropoff.get("name") or "Drop-off Facility").strip()
         except (json.JSONDecodeError, KeyError, TypeError, ValueError):
             return JSONResponse(
                 {"status": "ERROR", "error": "Choose and confirm a drop-off facility before planning routes."},
                 status_code=400,
             )
 
-        if not (-90.0 <= submitted_lat <= 90.0 and -180.0 <= submitted_lon <= 180.0):
+        if (
+            not saved_dropoff
+            or not saved_dropoff.get("confirmed")
+            or saved_dropoff.get("lat") is None
+            or saved_dropoff.get("lon") is None
+            or abs(float(saved_dropoff["lat"]) - submitted_lat) > 1e-7
+            or abs(float(saved_dropoff["lon"]) - submitted_lon) > 1e-7
+        ):
             return JSONResponse(
-                {"status": "ERROR", "error": "Drop-off facility coordinates are invalid."},
+                {"status": "ERROR", "error": "Choose and confirm a drop-off facility before planning routes."},
                 status_code=400,
             )
 
+        dropoff = saved_dropoff
         facility = {
-            "name": facility_name,
-            "lat": submitted_lat,
-            "lon": submitted_lon,
+            "name": dropoff.get("name") or "Drop-off Facility",
+            "lat": float(dropoff["lat"]),
+            "lon": float(dropoff["lon"]),
         }
-
-        # Sync this confirmed facility for the user in the background
-        try:
-            from .routes_dropoff import _dropoff_file
-            for uid in [user["id"], "supervisor"]:
-                dropoff_file, _ = _dropoff_file(uid)
-                dropoff_file.parent.mkdir(parents=True, exist_ok=True)
-                with open(dropoff_file, "w", encoding="utf-8") as f:
-                    json.dump({
-                        "name": facility_name,
-                        "lat": submitted_lat,
-                        "lon": submitted_lon,
-                        "confirmed": True,
-                        "confirmed_by": user.get("email") or "Supervisor",
-                    }, f, indent=2)
-        except Exception as save_err:
-            logger.warning(f"Could not persist user dropoff file: {save_err}")
 
         shift_filter = str(form.get("shift_filter") or "ALL").strip().upper()
         if shift_filter != "ALL" and shift_filter not in config.SHIFT_ARRIVAL_DEADLINES:
@@ -260,12 +248,32 @@ async def plan_multi_shift(request: Request, user: dict = Depends(require_authen
         )
         all_routes = [route for shift in results for route in shift.get("routes", [])]
 
+        # Automatically archive to history immediately upon generation
+        history_record = None
+        try:
+            from .routes_history import save_roster_history
+            total_emp = sum(s.get("total_employees_in_roster", 0) for s in results)
+            routed_emp = sum(s.get("assigned_passengers", 0) for s in results)
+            archive_data = {
+                "uploaded_file_name": uploaded.filename or "Uploaded roster.xlsx",
+                "total_employees": total_emp or len(all_routes) * 10,
+                "routed_employees": routed_emp or len(all_routes) * 10,
+                "total_routes": len(all_routes),
+                "destination_name": facility.get("name", "Drop-off Facility"),
+                "shifts_summary": results,
+            }
+            res_history = save_roster_history(data=archive_data, user=user)
+            history_record = res_history.get("record")
+        except Exception as hist_err:
+            logger.warning(f"Auto-saving roster history failed: {hist_err}")
+
         return {
             "status": "SUCCESS",
             "shifts": results,
             "routes": all_routes,
             "excel_available": out_path.exists(),
             "excel_filename": "FINAL_OPTIMIZED_BUS_ROSTER.xlsx",
+            "history_record": history_record,
         }
     except Exception as e:
         logger.error(f"Error in /api/plan_multi_shift: {e}", exc_info=True)

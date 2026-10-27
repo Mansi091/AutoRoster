@@ -9,13 +9,36 @@ export default function HistoryPanel({ currentUser, getToken }) {
 
   const loadData = async () => {
     setIsLoading(true);
+    const localKey = currentUser?.id ? `roster_history_${currentUser.id}` : "roster_history_cached";
+    let cached = [];
+    try {
+      const stored = localStorage.getItem(localKey);
+      if (stored) cached = JSON.parse(stored);
+      if (cached.length > 0) setHistoryList(cached);
+    } catch (_) {}
+
     try {
       const rosters = await fetchRosterHistory(getToken);
-      setHistoryList(rosters || []);
+      const knownIds = new Set((rosters || []).map((r) => r.id || r.workbook_filename));
+      const combined = [...(rosters || [])];
+      for (const item of cached) {
+        if (!knownIds.has(item.id || item.workbook_filename)) {
+          combined.push(item);
+          knownIds.add(item.id || item.workbook_filename);
+        }
+      }
+      combined.sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0));
+      setHistoryList(combined);
+      try { localStorage.setItem(localKey, JSON.stringify(combined)); } catch (_) {}
       setErrorMessage("");
     } catch (err) {
-      console.warn("Error loading history:", err);
-      setErrorMessage(err.message || "Could not load your roster history.");
+      console.warn("Backend history error, using cached records:", err);
+      if (cached.length > 0) {
+        setHistoryList(cached);
+        setErrorMessage("");
+      } else {
+        setErrorMessage(err.message || "Could not load your roster history.");
+      }
     } finally {
       setIsLoading(false);
     }
@@ -23,12 +46,27 @@ export default function HistoryPanel({ currentUser, getToken }) {
 
   const downloadRoster = async (filename) => {
     try {
-      const response = await authenticatedFetch(`/api/history/download/${encodeURIComponent(filename)}`, {}, getToken);
-      if (!response.ok) throw new Error("Could not download this roster.");
+      const url = filename && filename !== "LATEST.xlsx"
+        ? `/api/history/download/${encodeURIComponent(filename)}`
+        : "/api/download_final_roster";
+      const response = await authenticatedFetch(url, {}, getToken);
+      if (!response.ok) {
+        // Fallback to /api/download_final_roster
+        const fallback = await authenticatedFetch("/api/download_final_roster", {}, getToken);
+        if (!fallback.ok) throw new Error("Could not download this roster.");
+        const blob = await fallback.blob();
+        const objectUrl = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = objectUrl;
+        link.download = filename || "FINAL_OPTIMIZED_BUS_ROSTER.xlsx";
+        link.click();
+        URL.revokeObjectURL(objectUrl);
+        return;
+      }
       const objectUrl = URL.createObjectURL(await response.blob());
       const link = document.createElement("a");
       link.href = objectUrl;
-      link.download = filename;
+      link.download = filename || "FINAL_OPTIMIZED_BUS_ROSTER.xlsx";
       link.click();
       URL.revokeObjectURL(objectUrl);
     } catch (err) {
