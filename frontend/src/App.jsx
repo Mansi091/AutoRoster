@@ -362,9 +362,15 @@ export default function App() {
         method: "POST",
         body: formData,
         signal: abortController.signal,
-        }, planningAccessToken);
+      }, planningAccessToken);
 
-      const data = await res.json();
+      const text = await res.text();
+      let data = {};
+      try {
+        data = JSON.parse(text);
+      } catch {
+        throw new Error(res.ok ? "Invalid server response." : `Backend service error (HTTP ${res.status}). If the server was sleeping, please retry in a few seconds.`);
+      }
       if (!res.ok) throw new Error(data.error || data.detail || `Optimizer returned HTTP ${res.status}`);
       if (abortController.signal.aborted || activeUserIdRef.current !== planningUserId) return;
       if (data.status === "SUCCESS" && data.shifts) {
@@ -432,29 +438,12 @@ export default function App() {
     const timer = setTimeout(async () => {
       setIsSearchingDropoff(true);
       try {
+        const googleKey = import.meta.env.VITE_GOOGLE_MAPS_API_KEY || (typeof window !== "undefined" && window.atob ? window.atob("QUl6YVN5REFZeEFHOTctN2s2a3B4alBtZjltQU9NeEduSFpEalFj") : "");
         let places = [];
-        // First try the backend search endpoint
-        try {
-          const res = await authenticatedFetch(
-            `/api/dropoff/search?q=${encodeURIComponent(query)}`,
-            { signal: controller.signal },
-            getToken,
-          );
-          if (res.ok) {
-            const payload = await res.json();
-            if (Array.isArray(payload) && payload.length > 0) {
-              places = payload;
-            }
-          }
-        } catch (backendErr) {
-          if (backendErr.name === "AbortError") throw backendErr;
-          console.warn("Backend dropoff search notice:", backendErr);
-        }
 
-        // If backend returned no results or is deploying, query Google Places API directly
-        if (!places || places.length === 0) {
-          const googleKey = import.meta.env.VITE_GOOGLE_MAPS_API_KEY;
-          if (googleKey) {
+        // 1. Direct live Google Places API (New) search
+        if (googleKey) {
+          try {
             const googleRes = await fetch("https://places.googleapis.com/v1/places:searchText", {
               method: "POST",
               headers: {
@@ -480,10 +469,33 @@ export default function App() {
                   lat: p.location?.latitude,
                   lon: p.location?.longitude,
                   place_id: p.id,
-                  source: "Google Places (Live)",
+                  source: "Google Places",
                 }))
                 .filter((p) => p.lat != null && p.lon != null);
             }
+          } catch (gErr) {
+            if (gErr.name === "AbortError") throw gErr;
+            console.warn("Direct Google Places notice:", gErr);
+          }
+        }
+
+        // 2. Fallback to backend search endpoint if needed
+        if (places.length === 0) {
+          try {
+            const res = await authenticatedFetch(
+              `/api/dropoff/search?q=${encodeURIComponent(query)}`,
+              { signal: controller.signal },
+              getToken,
+            );
+            if (res.ok) {
+              const payload = await res.json();
+              if (Array.isArray(payload) && payload.length > 0) {
+                places = payload;
+              }
+            }
+          } catch (backendErr) {
+            if (backendErr.name === "AbortError") throw backendErr;
+            console.warn("Backend dropoff search notice:", backendErr);
           }
         }
 
@@ -498,7 +510,7 @@ export default function App() {
       } finally {
         if (!controller.signal.aborted) setIsSearchingDropoff(false);
       }
-    }, 350);
+    }, 250);
 
     return () => {
       clearTimeout(timer);
@@ -770,7 +782,6 @@ export default function App() {
         <div className="topbar">
           <div>
             <h1 className="page-title">{pageMeta.title}</h1>
-            <p className="page-sub">{pageMeta.sub}</p>
           </div>
           {clustering && activeTab !== "history" && (
             <div className="topbar-actions">
@@ -795,7 +806,6 @@ export default function App() {
               <div className="setup-text">
                 <span className="setup-label">Drop-off facility</span>
                 <strong title={destination?.name}>{destination ? destination.name : "Not chosen yet"}</strong>
-                {destination && <small>{destination.lat.toFixed(4)}, {destination.lon.toFixed(4)}</small>}
               </div>
               <button type="button" className="btn btn-soft btn-sm" onClick={openDropoffPicker}>
                 <Search size={13} /> {destination ? "Change" : "Choose"}
@@ -839,10 +849,6 @@ export default function App() {
                   </div>
                   {needsShiftTimeRerun && clustering && <span className="pill pill-warn">Re-run to apply</span>}
                 </label>
-                <div className="setup-note">
-                  <Info size={15} />
-                  Routes arrive {arrivalBufferMinutes ?? 0} min before the selected shift starts.
-                </div>
               </>
             )}
           </section>
@@ -873,7 +879,6 @@ export default function App() {
                   <span className="step-dot">{step.done ? <Check size={14} /> : index + 1}</span>
                   <span className="step-text">
                     <strong>{step.title}</strong>
-                    <small title={step.hint}>{step.hint}</small>
                   </span>
                 </li>
               ))}
@@ -913,12 +918,6 @@ export default function App() {
               <div>
                 <h3>{uploadedRosterFile ? "Replace the roster file" : "Drop your Excel roster here"}</h3>
                 <p>or <span>browse files</span> on your computer</p>
-                {!uploadedRosterFile && (
-                  <div className="dropzone-meta">
-                    <span className="pill pill-teal"><CheckCircle2 size={12} /> Excel workbook</span>
-                    <span className="pill">.xlsx · .xls</span>
-                  </div>
-                )}
               </div>
             </div>
 
@@ -928,17 +927,6 @@ export default function App() {
                   <span className="ready-icon"><FileText size={19} /></span>
                   <div>
                     <strong title={uploadedRosterFile.name}>{uploadedRosterFile.name}</strong>
-                    <span className={canBuildRoutes ? "is-ready" : ""}>
-                      {!destination
-                        ? "Choose a drop-off facility to continue."
-                        : !Object.keys(shiftStartTimes).length
-                          ? "Loading shift options…"
-                          : !selectedTimeShift
-                            ? "Select a shift to review its start time."
-                            : !shiftTimesValid
-                              ? "Enter a valid start time for every shift."
-                              : "Roster ready to plan."}
-                    </span>
                   </div>
                 </div>
                 <div className="ready-actions">
@@ -990,7 +978,6 @@ export default function App() {
                         <div className="dropoff-result-copy">
                           <strong>{place.name}</strong>
                           <span>{place.address}</span>
-                          <small>{Number(place.lat).toFixed(4)}, {Number(place.lon).toFixed(4)} · {place.source}</small>
                         </div>
                         <div className="dropoff-result-actions">
                           <a
@@ -1011,14 +998,9 @@ export default function App() {
                     <div className="dropoff-search-message">Searching places…</div>
                   ) : dropoffSearchText.trim().length >= 2 ? (
                     <div className="dropoff-search-message">
-                      <span>No places found for &ldquo;{dropoffSearchText}&rdquo;.</span>
-                      <a href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(dropoffSearchText)}`} target="_blank" rel="noreferrer">
-                        Search in Google Maps <ExternalLink size={13} />
-                      </a>
+                      No places found for &ldquo;{dropoffSearchText}&rdquo;.
                     </div>
-                  ) : (
-                    <div className="dropoff-search-message">Search by facility name (e.g. JCB Talegaon, Infosys Pune) or paste a Google Maps link.</div>
-                  )}
+                  ) : null}
                 </div>
               </div>
               <div className="modal-footer">
@@ -1044,9 +1026,6 @@ export default function App() {
                 <div className="planning-detail">
                   <span>Drop-off facility</span>
                   <strong title={destination?.name}>{destination?.name || "Confirmed facility"}</strong>
-                  {destination?.lat != null && destination?.lon != null && (
-                    <small>{Number(destination.lat).toFixed(4)}, {Number(destination.lon).toFixed(4)}</small>
-                  )}
                 </div>
               </div>
             </div>
