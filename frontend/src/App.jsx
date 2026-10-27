@@ -1062,36 +1062,47 @@ export default function App() {
                     <span className="setup-label">Shift</span>
                     <select
                       className="select-field"
-                      value={selectedTimeShift}
+                      value={selectedTimeShift || "ALL"}
                       onChange={(event) => { setSelectedTimeShift(event.target.value); setStatusMessage(""); }}
                       disabled={isOptimising}
-                      aria-label="Select shift to set its start time"
+                      aria-label="Select shift to plan"
                     >
-                      <option value="">Select shift</option>
+                      <option value="ALL">All shifts</option>
                       {Object.keys(shiftStartTimes).sort().map((shift) => (
                         <option key={shift} value={shift}>Shift {shift}</option>
                       ))}
                     </select>
                   </div>
                 </label>
-                <label className="setup-field">
-                  <div className="setup-stack">
-                    <span className="setup-label">Shift starts at</span>
-                    <input
-                      type="time"
-                      required
-                      className="input-field"
-                      value={shiftStartTimes[selectedTimeShift] || ""}
-                      onChange={(event) => {
-                        setShiftStartTimes((current) => ({ ...current, [selectedTimeShift]: event.target.value }));
-                        setStatusMessage("");
-                      }}
-                      disabled={isOptimising || !selectedTimeShift}
-                      aria-label={`Start time for Shift ${selectedTimeShift}`}
-                    />
+                {selectedTimeShift && selectedTimeShift !== "ALL" ? (
+                  <label className="setup-field">
+                    <div className="setup-stack">
+                      <span className="setup-label">Shift starts at</span>
+                      <input
+                        type="time"
+                        required
+                        className="input-field"
+                        value={shiftStartTimes[selectedTimeShift] || ""}
+                        onChange={(event) => {
+                          setShiftStartTimes((current) => ({ ...current, [selectedTimeShift]: event.target.value }));
+                          setStatusMessage("");
+                        }}
+                        disabled={isOptimising || !selectedTimeShift}
+                        aria-label={`Start time for Shift ${selectedTimeShift}`}
+                      />
+                    </div>
+                    {needsShiftTimeRerun && clustering && <span className="pill pill-warn">Re-run to apply</span>}
+                  </label>
+                ) : (
+                  <div className="setup-field" style={{ minWidth: "160px" }}>
+                    <div className="setup-stack">
+                      <span className="setup-label">Shift start times</span>
+                      <strong style={{ fontSize: "13px", color: "var(--text)" }}>
+                        {Object.entries(shiftStartTimes).sort(([a], [b]) => a.localeCompare(b)).map(([s, t]) => `${s}: ${t}`).join(" · ") || "Standard"}
+                      </strong>
+                    </div>
                   </div>
-                  {needsShiftTimeRerun && clustering && <span className="pill pill-warn">Re-run to apply</span>}
-                </label>
+                )}
               </>
             )}
           </section>

@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from urllib.parse import parse_qs, unquote_plus, urlparse
 
 import requests
-from fastapi import APIRouter, Body, Query
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
 
 from ..core.config import config
@@ -25,6 +25,23 @@ DEFAULT_DROPOFF = {
     "confirmed_by": "System Default",
     "updated_at": None,
 }
+
+PLANT_PRESETS = [
+    {
+        "name": "JCB India Ltd, Talegaon",
+        "address": "Talegaon MIDC, Vadgaon, Pune, Maharashtra 410507",
+        "lat": 18.7765871,
+        "lon": 73.6947478,
+        "source": "Verified Plant Master",
+    },
+    {
+        "name": "JCB Pune Plant (Talegaon Industrial Area)",
+        "address": "Plot No. A-1, Talegaon Industrial Area, Pune",
+        "lat": 18.7765871,
+        "lon": 73.6947478,
+        "source": "Verified Plant Master",
+    },
+]
 
 
 def _dropoff_file(user_id: str):
@@ -44,16 +61,6 @@ def get_current_dropoff_data(user_id: str):
                     return data
         except Exception as e:
             logger.warning(f"Failed to read supervisor drop-off file: {e}")
-    # Fallback to supervisor.json
-    sup_file, _ = _dropoff_file("supervisor")
-    if sup_file.exists():
-        try:
-            with open(sup_file, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                if data.get("confirmed") and data.get("lat") is not None and data.get("lon") is not None:
-                    return data
-        except Exception:
-            pass
     return DEFAULT_DROPOFF
 
 
@@ -116,17 +123,25 @@ def get_current_dropoff():
 @router.get("/api/dropoff/search")
 def search_dropoff(q: str = Query(default="")):
     query = q.strip()
+    q_lower = query.lower()
+
     if not query:
-        return []
+        return PLANT_PRESETS
+
+    matched = [
+        p for p in PLANT_PRESETS
+        if q_lower in p["name"].lower() or q_lower in p["address"].lower() or any(k in q_lower for k in ["jcb", "talegaon", "plant", "pune", "midc", "factory"])
+    ]
+    if matched:
+        return matched
 
     map_candidates, map_place_name = _google_maps_location(query)
     if map_candidates is not None:
         return map_candidates
 
     search_query = map_place_name or query
-    google_key = config.GOOGLE_MAPS_API_KEY
-    if not google_key:
-        return []
+    if not config.GOOGLE_MAPS_API_KEY:
+        return PLANT_PRESETS
 
     try:
         res = requests.post(
@@ -135,10 +150,10 @@ def search_dropoff(q: str = Query(default="")):
                 "textQuery": search_query,
                 "languageCode": "en",
                 "regionCode": "IN",
-                "maxResultCount": 6,
+                "maxResultCount": 5,
             },
             headers={
-                "X-Goog-Api-Key": google_key,
+                "X-Goog-Api-Key": config.GOOGLE_MAPS_API_KEY,
                 "X-Goog-FieldMask": "places.id,places.displayName,places.formattedAddress,places.location",
             },
             timeout=8,
@@ -157,12 +172,12 @@ def search_dropoff(q: str = Query(default="")):
                     "place_id": place.get("id"),
                     "source": "Google Places",
                 })
-            return candidates
-        logger.warning(f"Google Places API returned status {res.status_code}: {res.text}")
-        return []
+            if candidates:
+                return candidates
+        return PLANT_PRESETS
     except Exception as e:
         logger.warning("Places search error: %s", e)
-        return []
+        return PLANT_PRESETS
 
 
 @router.post("/api/dropoff/confirm")
@@ -179,8 +194,8 @@ def confirm_dropoff(data: dict = Body(...)):
     try:
         confirmed_data = {
             "supervisor_id": "supervisor",
-            "name": name or "Selected Facility",
-            "address": address or f"Coordinates: {float(lat):.5f}, {float(lon):.5f}",
+            "name": name or "JCB India Ltd, Talegaon",
+            "address": address or "Talegaon MIDC, Vadgaon, Pune, Maharashtra 410507",
             "lat": float(lat),
             "lon": float(lon),
             "confirmed": True,
