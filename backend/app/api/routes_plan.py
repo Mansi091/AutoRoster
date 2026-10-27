@@ -207,7 +207,6 @@ async def plan_multi_shift(request: Request, user: dict = Depends(require_authen
 
         # Auto-sync confirmed facility for user in background
         try:
-            import json
             from .routes_dropoff import _dropoff_file
             for uid in [user["id"], "supervisor"]:
                 f_path, _ = _dropoff_file(uid)
