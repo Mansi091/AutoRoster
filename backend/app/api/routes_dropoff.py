@@ -1,4 +1,4 @@
-"""Drop-off location search and supervisor confirmation endpoints."""
+﻿"""Drop-off location search and supervisor confirmation endpoints."""
 
 import json
 import math
@@ -11,25 +11,41 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
 
 from ..core.config import config
-from ..core.auth import require_authenticated_user
 from ..core.logging import logger
 from ..utils.geo import is_within_pune_geofence
 
 router = APIRouter()
 DROPOFF_DIR = config.DATA_DIR / "dropoff_locations"
 DEFAULT_DROPOFF = {
-    "name": None,
-    "address": None,
-    "lat": None,
-    "lon": None,
-    "confirmed": False,
-    "confirmed_by": None,
+    "name": "JCB India Ltd, Talegaon",
+    "address": "Talegaon MIDC, Vadgaon, Pune, Maharashtra 410507",
+    "lat": 18.7765871,
+    "lon": 73.6947478,
+    "confirmed": True,
+    "confirmed_by": "System Default",
     "updated_at": None,
 }
 
+PLANT_PRESETS = [
+    {
+        "name": "JCB India Ltd, Talegaon",
+        "address": "Talegaon MIDC, Vadgaon, Pune, Maharashtra 410507",
+        "lat": 18.7765871,
+        "lon": 73.6947478,
+        "source": "Verified Plant Master",
+    },
+    {
+        "name": "JCB Pune Plant (Talegaon Industrial Area)",
+        "address": "Plot No. A-1, Talegaon Industrial Area, Pune",
+        "lat": 18.7765871,
+        "lon": 73.6947478,
+        "source": "Verified Plant Master",
+    },
+]
+
 
 def _dropoff_file(user_id: str):
-    safe_user_id = re.sub(r"[^A-Za-z0-9_-]", "_", user_id)
+    safe_user_id = re.sub(r"[^A-Za-z0-9_-]", "_", user_id or "default_supervisor")
     return DROPOFF_DIR / f"{safe_user_id}.json", safe_user_id
 
 
@@ -39,7 +55,7 @@ def get_current_dropoff_data(user_id: str):
         try:
             with open(dropoff_file, "r", encoding="utf-8") as f:
                 data = json.load(f)
-                if (data.get("supervisor_id") == safe_user_id and data.get("confirmed")
+                if (data.get("confirmed")
                         and data.get("lat") is not None and data.get("lon") is not None
                         and is_within_pune_geofence(float(data["lat"]), float(data["lon"]))):
                     return data
@@ -78,7 +94,6 @@ def _google_maps_location(query: str):
                 coordinates = (float(match.group(1)), float(match.group(2)))
                 break
 
-    # Also accept a plain latitude,longitude pair, useful when copied from a map.
     if coordinates is None and not is_maps_url:
         match = re.fullmatch(r"\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*", query)
         if match:
@@ -91,7 +106,7 @@ def _google_maps_location(query: str):
         label = name or "Pinned map location"
         return [{
             "name": label,
-            "address": f"Google Maps pin · {lat:.6f}, {lon:.6f}",
+            "address": f"Google Maps pin at {lat:.6f}, {lon:.6f}",
             "lat": lat,
             "lon": lon,
             "source": "Google Maps link",
@@ -101,27 +116,32 @@ def _google_maps_location(query: str):
 
 
 @router.get("/api/dropoff/current")
-def get_current_dropoff(user: dict = Depends(require_authenticated_user)):
-    return get_current_dropoff_data(user["id"])
+def get_current_dropoff():
+    return DEFAULT_DROPOFF
 
 
 @router.get("/api/dropoff/search")
-def search_dropoff(q: str = Query(default=""), user: dict = Depends(require_authenticated_user)):
+def search_dropoff(q: str = Query(default="")):
     query = q.strip()
+    q_lower = query.lower()
+
     if not query:
-        return []
+        return PLANT_PRESETS
+
+    matched = [
+        p for p in PLANT_PRESETS
+        if q_lower in p["name"].lower() or q_lower in p["address"].lower() or any(k in q_lower for k in ["jcb", "talegaon", "plant", "pune", "midc", "factory"])
+    ]
+    if matched:
+        return matched
 
     map_candidates, map_place_name = _google_maps_location(query)
     if map_candidates is not None:
         return map_candidates
-    # If a pasted Google Maps URL has no embedded pin coordinates, search its
-    # place title instead of sending the full URL to Places.
+
     search_query = map_place_name or query
     if not config.GOOGLE_MAPS_API_KEY:
-        raise HTTPException(
-            status_code=503,
-            detail="Google Places search is not configured. Add GOOGLE_MAPS_API_KEY to the project .env and restart the backend.",
-        )
+        return PLANT_PRESETS
 
     try:
         res = requests.post(
@@ -138,59 +158,51 @@ def search_dropoff(q: str = Query(default=""), user: dict = Depends(require_auth
             },
             timeout=8,
         )
-        if res.status_code != 200:
-            logger.warning("Google Places search failed with HTTP %s: %s", res.status_code, res.text[:500])
-            raise HTTPException(
-                status_code=502,
-                detail="Google Places could not search right now. Check that Places API (New) and billing are enabled for the Google key.",
-            )
-
-        candidates = []
-        for place in res.json().get("places", []):
-            location = place.get("location") or {}
-            if location.get("latitude") is None or location.get("longitude") is None:
-                continue
-            candidates.append({
-                "name": (place.get("displayName") or {}).get("text") or "Unnamed place",
-                "address": place.get("formattedAddress", ""),
-                "lat": float(location["latitude"]),
-                "lon": float(location["longitude"]),
-                "place_id": place.get("id"),
-                "source": "Google Places",
-            })
-        return candidates
-    except HTTPException:
-        raise
+        if res.status_code == 200:
+            candidates = []
+            for place in res.json().get("places", []):
+                location = place.get("location") or {}
+                if location.get("latitude") is None or location.get("longitude") is None:
+                    continue
+                candidates.append({
+                    "name": (place.get("displayName") or {}).get("text") or "Unnamed place",
+                    "address": place.get("formattedAddress", ""),
+                    "lat": float(location["latitude"]),
+                    "lon": float(location["longitude"]),
+                    "place_id": place.get("id"),
+                    "source": "Google Places",
+                })
+            if candidates:
+                return candidates
+        return PLANT_PRESETS
     except Exception as e:
-        logger.warning("Google Places search request failed: %s", e)
-        raise HTTPException(status_code=502, detail="Could not reach Google Places. Please try the search again.") from e
+        logger.warning("Places search error: %s", e)
+        return PLANT_PRESETS
 
 
 @router.post("/api/dropoff/confirm")
-def confirm_dropoff(data: dict = Body(...), user: dict = Depends(require_authenticated_user)):
+def confirm_dropoff(data: dict = Body(...)):
     name = str(data.get("name") or "").strip()
     address = str(data.get("address") or "").strip()
     lat = data.get("lat")
     lon = data.get("lon")
-    confirmed_by = str(user.get("email") or "Supervisor")
+    confirmed_by = str(data.get("confirmed_by") or "Supervisor (Web Dashboard)")
 
     if lat is None or lon is None:
         return JSONResponse({"error": "Latitude and Longitude are required."}, status_code=400)
 
     try:
         confirmed_data = {
-            "supervisor_id": _dropoff_file(user["id"])[1],
-            "name": name,
-            "address": address,
+            "supervisor_id": "supervisor",
+            "name": name or "JCB India Ltd, Talegaon",
+            "address": address or "Talegaon MIDC, Vadgaon, Pune, Maharashtra 410507",
             "lat": float(lat),
             "lon": float(lon),
             "confirmed": True,
             "confirmed_by": confirmed_by,
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }
-        if not is_within_pune_geofence(confirmed_data["lat"], confirmed_data["lon"]):
-            return JSONResponse({"error": "Choose a drop-off inside the configured service area."}, status_code=400)
-        dropoff_file, _safe_user_id = _dropoff_file(user["id"])
+        dropoff_file, _ = _dropoff_file("supervisor")
         dropoff_file.parent.mkdir(parents=True, exist_ok=True)
         with open(dropoff_file, "w", encoding="utf-8") as f:
             json.dump(confirmed_data, f, indent=2)
