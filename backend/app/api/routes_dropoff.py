@@ -44,6 +44,16 @@ def get_current_dropoff_data(user_id: str):
                     return data
         except Exception as e:
             logger.warning(f"Failed to read supervisor drop-off file: {e}")
+    # Fallback to supervisor.json
+    sup_file, _ = _dropoff_file("supervisor")
+    if sup_file.exists():
+        try:
+            with open(sup_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if data.get("confirmed") and data.get("lat") is not None and data.get("lon") is not None:
+                    return data
+        except Exception:
+            pass
     return DEFAULT_DROPOFF
 
 
@@ -177,10 +187,12 @@ def confirm_dropoff(data: dict = Body(...)):
             "confirmed_by": confirmed_by,
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }
-        dropoff_file, _ = _dropoff_file("supervisor")
-        dropoff_file.parent.mkdir(parents=True, exist_ok=True)
-        with open(dropoff_file, "w", encoding="utf-8") as f:
-            json.dump(confirmed_data, f, indent=2)
+        user_id = str(data.get("user_id") or "supervisor").strip()
+        for uid in set(["supervisor", user_id]):
+            dropoff_file, _ = _dropoff_file(uid)
+            dropoff_file.parent.mkdir(parents=True, exist_ok=True)
+            with open(dropoff_file, "w", encoding="utf-8") as f:
+                json.dump(confirmed_data, f, indent=2)
     except (TypeError, ValueError) as e:
         return JSONResponse({"error": f"Invalid latitude or longitude: {e}"}, status_code=400)
     except Exception as e:

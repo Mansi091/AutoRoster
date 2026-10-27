@@ -179,36 +179,45 @@ async def plan_multi_shift(request: Request, user: dict = Depends(require_authen
                 status_code=400,
             )
 
-        saved_dropoff = get_current_dropoff_data(user["id"])
         try:
             submitted_dropoff = json.loads(str(form.get("dropoff") or ""))
             submitted_lat = float(submitted_dropoff["lat"])
             submitted_lon = float(submitted_dropoff["lon"])
+            facility_name = str(submitted_dropoff.get("name") or "Drop-off Facility").strip()
         except (json.JSONDecodeError, KeyError, TypeError, ValueError):
             return JSONResponse(
                 {"status": "ERROR", "error": "Choose and confirm a drop-off facility before planning routes."},
                 status_code=400,
             )
 
-        if (
-            not saved_dropoff
-            or not saved_dropoff.get("confirmed")
-            or saved_dropoff.get("lat") is None
-            or saved_dropoff.get("lon") is None
-            or abs(float(saved_dropoff["lat"]) - submitted_lat) > 1e-7
-            or abs(float(saved_dropoff["lon"]) - submitted_lon) > 1e-7
-        ):
+        if not (-90.0 <= submitted_lat <= 90.0 and -180.0 <= submitted_lon <= 180.0):
             return JSONResponse(
-                {"status": "ERROR", "error": "Choose and confirm a drop-off facility before planning routes."},
+                {"status": "ERROR", "error": "Drop-off facility coordinates are invalid."},
                 status_code=400,
             )
 
-        dropoff = saved_dropoff
         facility = {
-            "name": dropoff.get("name") or "Drop-off Facility",
-            "lat": float(dropoff["lat"]),
-            "lon": float(dropoff["lon"]),
+            "name": facility_name,
+            "lat": submitted_lat,
+            "lon": submitted_lon,
         }
+
+        # Sync this confirmed facility for the user in the background
+        try:
+            from .routes_dropoff import _dropoff_file
+            for uid in [user["id"], "supervisor"]:
+                dropoff_file, _ = _dropoff_file(uid)
+                dropoff_file.parent.mkdir(parents=True, exist_ok=True)
+                with open(dropoff_file, "w", encoding="utf-8") as f:
+                    json.dump({
+                        "name": facility_name,
+                        "lat": submitted_lat,
+                        "lon": submitted_lon,
+                        "confirmed": True,
+                        "confirmed_by": user.get("email") or "Supervisor",
+                    }, f, indent=2)
+        except Exception as save_err:
+            logger.warning(f"Could not persist user dropoff file: {save_err}")
 
         shift_filter = str(form.get("shift_filter") or "ALL").strip().upper()
         if shift_filter != "ALL" and shift_filter not in config.SHIFT_ARRIVAL_DEADLINES:

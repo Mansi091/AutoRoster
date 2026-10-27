@@ -1,3 +1,5 @@
+DEFAULT_FACILITY = {"name": "JCB India Ltd", "lat": 18.7765871, "lon": 73.6669931}
+
 """Pickup Aggregator and Road Travel-Time Matrix Builder for CVRPTW.
 
 Step 2 & Step 3 Implementation:

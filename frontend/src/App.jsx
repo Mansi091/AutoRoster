@@ -23,6 +23,7 @@ import {
   Clock3,
   ExternalLink,
   Info,
+  ShieldCheck,
   Route as RouteIcon,
   Gauge,
 } from "lucide-react";
@@ -33,8 +34,6 @@ import RouteMap from "./components/RouteMap";
 import AuthModal from "./components/AuthModal";
 import HistoryPanel from "./components/HistoryPanel";
 import { recordRosterHistory, authenticatedFetch } from "./utils/clerk";
-
-const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
 
 function parseGoogleMapsLinkOrCoords(query) {
   const trimmed = (query || "").trim();
@@ -192,15 +191,12 @@ export default function App() {
   const [corridorFilter, setCorridorFilter] = useState("ALL");
   const [searchQuery, setSearchQuery] = useState("");
   const [shiftStartTimes, setShiftStartTimes] = useState({});
-  const [selectedTimeShift, setSelectedTimeShift] = useState("ALL");
+  const [selectedTimeShift, setSelectedTimeShift] = useState("");
   const [plannedRosterFile, setPlannedRosterFile] = useState(null);
+  const [plannedShiftStartTimes, setPlannedShiftStartTimes] = useState(null);
   const [arrivalBufferMinutes, setArrivalBufferMinutes] = useState(null);
   const fileInputRef = useRef(null);
   const [isRosterDragOver, setIsRosterDragOver] = useState(false);
-  const availableShifts = Object.keys(shiftStartTimes).sort();
-  const planningShifts = selectedTimeShift === "ALL"
-    ? availableShifts
-    : availableShifts.includes(selectedTimeShift) ? [selectedTimeShift] : [];
 
   // Drop-off Destination & Confirmation State (No hardcoded drop-off; must be confirmed by supervisor)
   const [destination, setDestination] = useState(null);
@@ -245,7 +241,7 @@ export default function App() {
       setClustering(null);
       setUploadedRosterFile(null);
       setPlannedRosterFile(null);
-      setSelectedTimeShift("ALL");
+      setSelectedTimeShift("");
       setDestination(null);
       setConfirmedDropoff(null);
       setShowVerifyModal(false);
@@ -267,7 +263,8 @@ export default function App() {
   useEffect(() => {
     if (!isLoaded || !isSignedIn) {
       setShiftStartTimes({});
-      setSelectedTimeShift("ALL");
+      setSelectedTimeShift("");
+      setPlannedShiftStartTimes(null);
       setArrivalBufferMinutes(null);
       return undefined;
     }
@@ -312,7 +309,7 @@ export default function App() {
     // picker is closed without confirming a replacement, planning stays blocked.
     setDestination(null);
     setConfirmedDropoff(null);
-    setSelectedTimeShift("ALL");
+    setSelectedTimeShift("");
     setDropoffCandidates([]);
     setDropoffSearchText("");
     setShowDropoffModal(true);
@@ -351,12 +348,12 @@ export default function App() {
       setStatusMessage("Error: Shift options are unavailable. Please reload and try again.");
       return;
     }
-    if (!planningShifts.length) {
+    if (!selectedTimeShift) {
       setStatusMessage("Error: Select a shift before building routes.");
       return;
     }
-    if (planningShifts.some((shift) => !TIME_RE.test(shiftStartTimes[shift] || ""))) {
-      setStatusMessage("Error: Shift start times are unavailable. Please reload and try again.");
+    if (Object.values(shiftStartTimes).some((time) => !/^([01]\d|2[0-3]):[0-5]\d$/.test(time || ""))) {
+      setStatusMessage("Error: Enter a valid start time for every shift before planning.");
       return;
     }
     const planningUserId = currentUser?.id;
@@ -368,8 +365,6 @@ export default function App() {
     setIsOptimising(true);
     setStatusMessage("");
     try {
-      const planningAccessToken = await getToken({ skipCache: true });
-      if (!planningAccessToken) throw new Error("Your sign-in has expired. Please sign in again.");
       if (activeUserIdRef.current !== planningUserId || abortController.signal.aborted) return;
       const formData = new FormData();
       formData.append("file", file);
@@ -378,15 +373,13 @@ export default function App() {
         lat: facility.lat,
         lon: facility.lon,
       }));
-      formData.append("shift_filter", selectedTimeShift);
-      formData.append("shift_start_times", JSON.stringify(
-        Object.fromEntries(planningShifts.map((shift) => [shift, shiftStartTimes[shift]]))
-      ));
+      formData.append("shift_filter", selectedTimeShift || "ALL");
+      formData.append("shift_start_times", JSON.stringify(shiftStartTimes));
       const res = await authenticatedFetch("/api/plan_multi_shift", {
         method: "POST",
         body: formData,
         signal: abortController.signal,
-      }, planningAccessToken);
+      }, getToken);
 
       const text = await res.text();
       let data = {};
@@ -401,6 +394,7 @@ export default function App() {
         const adapted = adaptMultiShiftResponse(data.shifts, facility);
         setClustering(adapted);
         setPlannedRosterFile(file);
+        setPlannedShiftStartTimes({ ...shiftStartTimes });
         setStatusMessage("");
 
         // Save this run to the signed-in supervisor's private history.
@@ -413,10 +407,9 @@ export default function App() {
             destination_name: facility.name || "",
             shifts_summary: data.shifts || [],
             created_at: new Date().toISOString(),
-          }, () => getToken({ skipCache: true }));
+          }, getToken);
         } catch (historyError) {
-          console.error("Could not archive roster history in Supabase:", historyError);
-          setStatusMessage(`Routes are ready, but this run could not be saved to roster history: ${historyError.message}`);
+          console.warn("Could not archive roster history:", historyError);
         }
       } else {
         throw new Error(data.error || "Optimization failed");
@@ -847,10 +840,10 @@ export default function App() {
     ? Math.min(100, Math.round((clustering.routed_employees / clustering.total_employees) * 100))
     : 0;
   const hasPendingRoster = Boolean(uploadedRosterFile && uploadedRosterFile !== plannedRosterFile);
-  const shiftTimesValid = planningShifts.length > 0 &&
-    planningShifts.every((shift) => TIME_RE.test(shiftStartTimes[shift] || ""));
   const canBuildRoutes = Boolean(
-    hasPendingRoster && destination && shiftTimesValid &&
+    hasPendingRoster && destination && selectedTimeShift &&
+    Object.keys(shiftStartTimes).length > 0 &&
+    Object.values(shiftStartTimes).every((time) => /^([01]\d|2[0-3]):[0-5]\d$/.test(time || "")) &&
     !isOptimising
   );
 
@@ -890,12 +883,20 @@ export default function App() {
     return list;
   }, [clustering, shiftFilter, employeeStatusFilter, searchQuery]);
 
-  const hasShiftChoice = shiftTimesValid;
+  const needsShiftTimeRerun = Boolean(
+    plannedShiftStartTimes && Object.keys(shiftStartTimes).some((shift) => plannedShiftStartTimes[shift] !== shiftStartTimes[shift])
+  );
+
+  
+  const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
+  const shiftTimesValid = Object.keys(shiftStartTimes).length > 0 &&
+    Object.values(shiftStartTimes).every((time) => TIME_RE.test(time || ""));
+  const hasShiftChoice = Boolean(selectedTimeShift) && shiftTimesValid;
 
   const setupSteps = [
     { title: "Upload roster", hint: uploadedRosterFile ? uploadedRosterFile.name : "Excel .xlsx or .xls", done: Boolean(uploadedRosterFile) },
     { title: "Drop-off facility", hint: destination ? destination.name : "Search and confirm", done: Boolean(destination) },
-    { title: "Shift", hint: hasShiftChoice ? selectedTimeShift === "ALL" ? "All shifts" : `Shift ${selectedTimeShift}` : "Pick a shift", done: hasShiftChoice },
+    { title: "Shift", hint: hasShiftChoice ? (selectedTimeShift === "ALL" ? "All shifts" : `Shift ${selectedTimeShift}`) : "Pick a shift", done: hasShiftChoice },
     { title: "Build routes", hint: canBuildRoutes ? "Ready when you are" : "Complete the steps first", done: false },
   ];
   const currentStepIndex = Math.max(0, setupSteps.findIndex((step) => !step.done));
@@ -1003,6 +1004,7 @@ export default function App() {
               <span className="user-avatar">{initials}</span>
               <div className="user-meta">
                 <strong title={currentUser.email}>{currentUser.display_name}</strong>
+                <span><ShieldCheck size={12} /> Supervisor</span>
               </div>
               <button type="button" className="icon-btn" onClick={handleSignOut} title="Sign out" aria-label="Sign out">
                 <LogOut size={16} />
@@ -1057,14 +1059,32 @@ export default function App() {
                       value={selectedTimeShift}
                       onChange={(event) => { setSelectedTimeShift(event.target.value); setStatusMessage(""); }}
                       disabled={isOptimising}
-                      aria-label="Select shifts to plan"
+                      aria-label="Select shift to set its start time"
                     >
-                      <option value="ALL">All shifts</option>
-                      {availableShifts.map((shift) => (
+                      <option value="">Select shift</option>
+                      {Object.keys(shiftStartTimes).sort().map((shift) => (
                         <option key={shift} value={shift}>Shift {shift}</option>
                       ))}
                     </select>
                   </div>
+                </label>
+                <label className="setup-field">
+                  <div className="setup-stack">
+                    <span className="setup-label">Shift starts at</span>
+                    <input
+                      type="time"
+                      required
+                      className="input-field"
+                      value={shiftStartTimes[selectedTimeShift] || ""}
+                      onChange={(event) => {
+                        setShiftStartTimes((current) => ({ ...current, [selectedTimeShift]: event.target.value }));
+                        setStatusMessage("");
+                      }}
+                      disabled={isOptimising || !selectedTimeShift}
+                      aria-label={`Start time for Shift ${selectedTimeShift}`}
+                    />
+                  </div>
+                  {needsShiftTimeRerun && clustering && <span className="pill pill-warn">Re-run to apply</span>}
                 </label>
               </>
             )}

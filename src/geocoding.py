@@ -103,7 +103,10 @@ def _select_geocode_candidate(pickup_name, candidates):
             continue
 
         # Check service radius from facility (max 28 km)
-        from aggregator_cvrptw import DEFAULT_FACILITY
+        try:
+            from aggregator_cvrptw import DEFAULT_FACILITY
+        except Exception:
+            DEFAULT_FACILITY = {"name": "Facility", "lat": 18.7765871, "lon": 73.6669931}
         dist_from_facility = haversine_km(coordinates[0], coordinates[1], DEFAULT_FACILITY["lat"], DEFAULT_FACILITY["lon"])
         if dist_from_facility > 28.0:
             continue
