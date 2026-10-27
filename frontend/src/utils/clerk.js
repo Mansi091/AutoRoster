@@ -1,6 +1,6 @@
 // Route all relative /api/* calls through the correct backend.
 //
-// Local dev:   VITE_BACKEND_URL is not set → Vite proxy forwards /api/* to localhost:5000
+// Local dev:   VITE_BACKEND_URL is not set → Vite proxy forwards /api/* to localhost:5000 (or Render)
 // Production:  VITE_BACKEND_URL is not set → vercel.json rewrites /api/* to https://autoroster.onrender.com
 //
 // If VITE_BACKEND_URL is explicitly set (e.g. for staging), it overrides both.
@@ -8,11 +8,24 @@ const BACKEND_URL = (import.meta.env.VITE_BACKEND_URL || "").replace(/\/$/, "");
 
 export async function authenticatedFetch(url, options = {}, tokenSource) {
   let token = null;
+
   if (tokenSource) {
     try {
       token = typeof tokenSource === "function" ? await tokenSource() : tokenSource;
+      if (!token && typeof tokenSource === "function") {
+        token = await tokenSource({ skipCache: true });
+      }
     } catch (e) {
       console.warn("Could not retrieve Clerk token:", e);
+    }
+  }
+
+  // Fallback to active Clerk session on window if available
+  if (!token && typeof window !== "undefined" && window.Clerk?.session) {
+    try {
+      token = await window.Clerk.session.getToken();
+    } catch (e) {
+      console.warn("Could not retrieve Clerk session token from window:", e);
     }
   }
 

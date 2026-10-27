@@ -365,8 +365,6 @@ export default function App() {
     setIsOptimising(true);
     setStatusMessage("");
     try {
-      const planningAccessToken = await getToken();
-      if (!planningAccessToken) throw new Error("Your sign-in has expired. Please sign in again.");
       if (activeUserIdRef.current !== planningUserId || abortController.signal.aborted) return;
       const formData = new FormData();
       formData.append("file", file);
@@ -380,7 +378,7 @@ export default function App() {
         method: "POST",
         body: formData,
         signal: abortController.signal,
-      }, planningAccessToken);
+      }, getToken);
 
       const text = await res.text();
       let data = {};
