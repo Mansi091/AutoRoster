@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from "react";
-import { Download, Calendar, FileText, MapPin, Users, Bus, RefreshCw } from "lucide-react";
+import { Download, Calendar, FileText, MapPin, Users, Bus, RefreshCw, AlertTriangle } from "lucide-react";
 import { fetchRosterHistory, authenticatedFetch } from "../utils/clerk";
 
 export default function HistoryPanel({ currentUser, getToken }) {
@@ -59,86 +59,81 @@ export default function HistoryPanel({ currentUser, getToken }) {
   return (
     <div className="table-panel">
       {/* This view is scoped to the authenticated supervisor by the backend. */}
-      <div className="table-filter-bar" style={{ justifyContent: "space-between" }}>
-        <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
-          <strong style={{ color: "#17243b", fontSize: "1rem" }}>Your roster history</strong>
-          <span style={{ color: "#64748b", fontSize: ".78rem" }}>{historyList.length} saved {historyList.length === 1 ? "plan" : "plans"}</span>
+      <div className="table-filter-bar">
+        <div className="table-title">
+          <strong>Your roster history</strong>
+          <span>{historyList.length} saved {historyList.length === 1 ? "plan" : "plans"}</span>
         </div>
-
-        <button
-          className="btn btn-secondary btn-sm"
-          onClick={loadData}
-          disabled={isLoading}
-          style={{ display: "flex", alignItems: "center", gap: 6 }}
-        >
+        <button className="btn btn-secondary btn-sm" onClick={loadData} disabled={isLoading}>
           <RefreshCw size={14} className={isLoading ? "spin" : ""} /> Refresh
         </button>
       </div>
 
-      {errorMessage && <div className="route-error-banner" role="alert">{errorMessage}</div>}
+      {errorMessage && (
+        <div className="banner banner-error" role="alert" style={{ margin: 16 }}>
+          <AlertTriangle size={16} />
+          <div>{errorMessage}</div>
+        </div>
+      )}
+
       <div className="table-scroll">
-          {historyList.length === 0 ? (
-            <div style={{ padding: "60px 20px", textAlign: "center", color: "#64748B" }}>
-              <FileText size={42} style={{ margin: "0 auto 12px", opacity: 0.4 }} />
-              <h4>No Previous Rosters Yet</h4>
-              <p style={{ fontSize: "0.85rem", marginTop: 4 }}>
-                When you run an optimization or upload an Excel sheet, it will be automatically archived here.
-              </p>
-            </div>
-          ) : (
-            <table className="custom-table">
-              <thead>
-                <tr>
-                  <th>Run Date</th>
-                  <th>Uploaded Sheet</th>
-                  <th>Drop-off Plant</th>
-                  <th>Employees</th>
-                  <th>Routes</th>
-                  <th>Action</th>
+        {isLoading && historyList.length === 0 ? (
+          <table className="custom-table">
+            <tbody>
+              {[0, 1, 2, 3].map((i) => (
+                <tr key={i} className="skeleton-row">
+                  {[0, 1, 2, 3, 4, 5].map((j) => (
+                    <td key={j}><span className="skeleton" /></td>
+                  ))}
                 </tr>
-              </thead>
-              <tbody>
-                {historyList.map((item, idx) => (
-                  <tr key={item.id || idx}>
-                    <td style={{ fontWeight: 600, color: "#1E293B", whiteSpace: "nowrap" }}>
-                      <Calendar size={13} style={{ display: "inline", marginRight: 5, color: "#2563EB" }} />
-                      {formatDate(item.created_at)}
-                    </td>
-                    <td style={{ fontWeight: 600 }}>{item.uploaded_file_name || "Uploaded roster"}</td>
-                    <td>
-                      <span style={{ display: "inline-flex", alignItems: "center", gap: 4, color: "#475569" }}>
-                        <MapPin size={13} color="#DC2626" />
-                        {item.destination_name || "Not recorded"}
-                      </span>
-                    </td>
-                    <td>
-                      <span className="badge-seats" style={{ background: "#EFF6FF", color: "#1D4ED8" }}>
-                        <Users size={12} style={{ display: "inline", marginRight: 3 }} />
-                        {item.routed_employees ?? item.total_employees ?? 0} pax
-                      </span>
-                    </td>
-                    <td>
-                      <span className="badge-seats" style={{ background: "#F0FDF4", color: "#15803D" }}>
-                        <Bus size={12} style={{ display: "inline", marginRight: 3 }} />
-                        {item.total_routes} routes
-                      </span>
-                    </td>
-                    <td>
-                      <button
-                        type="button"
-                        onClick={() => downloadRoster(item.workbook_filename)}
-                        className="btn btn-secondary btn-sm"
-                        style={{ display: "inline-flex", alignItems: "center", gap: 5, padding: "4px 10px" }}
-                        title="Download historical Excel workbook"
-                      >
-                        <Download size={13} /> Download Excel
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
+              ))}
+            </tbody>
+          </table>
+        ) : historyList.length === 0 ? (
+          <div className="empty-state">
+            <span className="empty-icon"><FileText size={24} /></span>
+            <h4>No previous rosters yet</h4>
+            <p>When you run an optimization it is automatically archived here, so you can download it again later.</p>
+          </div>
+        ) : (
+          <table className="custom-table">
+            <thead>
+              <tr>
+                <th>Run date</th>
+                <th>Uploaded sheet</th>
+                <th>Drop-off plant</th>
+                <th>Employees</th>
+                <th>Routes</th>
+                <th>Action</th>
+              </tr>
+            </thead>
+            <tbody>
+              {historyList.map((item, idx) => (
+                <tr key={item.id || idx}>
+                  <td className="cell-strong" style={{ whiteSpace: "nowrap" }}>
+                    <span className="cell-inline"><Calendar size={14} color="var(--accent)" /> {formatDate(item.created_at)}</span>
+                  </td>
+                  <td className="cell-strong">{item.uploaded_file_name || "Uploaded roster"}</td>
+                  <td>
+                    <span className="cell-inline cell-muted"><MapPin size={14} color="var(--bad)" /> {item.destination_name || "Not recorded"}</span>
+                  </td>
+                  <td><span className="pill pill-accent"><Users size={12} /> {item.routed_employees ?? item.total_employees ?? 0} pax</span></td>
+                  <td><span className="pill pill-teal"><Bus size={12} /> {item.total_routes} routes</span></td>
+                  <td>
+                    <button
+                      type="button"
+                      onClick={() => downloadRoster(item.workbook_filename)}
+                      className="btn btn-secondary btn-sm"
+                      title="Download historical Excel workbook"
+                    >
+                      <Download size={13} /> Download Excel
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
       </div>
     </div>
   );

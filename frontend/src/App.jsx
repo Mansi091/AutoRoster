@@ -35,22 +35,52 @@ import AuthModal from "./components/AuthModal";
 import HistoryPanel from "./components/HistoryPanel";
 import { recordRosterHistory, authenticatedFetch } from "./utils/clerk";
 
-const PRESET_FACILITIES = [
-  {
-    name: "JCB India Ltd, Talegaon",
-    address: "Talegaon MIDC, Vadgaon, Pune, Maharashtra 410507",
-    lat: 18.7765871,
-    lon: 73.6947478,
-    source: "Verified Plant Pin",
-  },
-  {
-    name: "JCB Pune Plant (Talegaon Industrial Area)",
-    address: "Plot No. A-1, Talegaon Industrial Area, Pune",
-    lat: 18.7765871,
-    lon: 73.6947478,
-    source: "Verified Plant Pin",
-  },
-];
+function parseGoogleMapsLinkOrCoords(query) {
+  const trimmed = (query || "").trim();
+  if (!trimmed) return null;
+
+  // Match direct raw coordinates e.g. "18.7765, 73.6947"
+  const directCoords = trimmed.match(/^[-+]?([1-8]?\d(?:\.\d+)?|90(?:\.0+)?),\s*[-+]?(180(?:\.0+)?|(?:(?:1[0-7]\d)|(?:[1-9]?\d))(?:\.\d+)?)$/);
+  if (directCoords) {
+    const parts = trimmed.split(",");
+    const lat = parseFloat(parts[0]);
+    const lon = parseFloat(parts[1]);
+    if (Number.isFinite(lat) && Number.isFinite(lon)) {
+      return [{
+        name: "Pinned Coordinates",
+        address: `Direct coordinate pin (${lat.toFixed(5)}, ${lon.toFixed(5)})`,
+        lat,
+        lon,
+        source: "Direct Coordinates",
+      }];
+    }
+  }
+
+  // Match Google Maps URL patterns
+  const atMatch = trimmed.match(/@(-?\d+(?:\.\d+)?),\s*(-?\d+(?:\.\d+)?)/);
+  const dMatch = trimmed.match(/!3d(-?\d+(?:\.\d+)?)!4d(-?\d+(?:\.\d+)?)/);
+  const match = atMatch || dMatch;
+  if (match) {
+    let placeName = "Google Maps Pin";
+    const nameMatch = trimmed.match(/\/maps\/place\/([^/@?]+)/);
+    if (nameMatch) {
+      try {
+        placeName = decodeURIComponent(nameMatch[1].replace(/\+/g, " "));
+      } catch (_) {}
+    }
+    const lat = parseFloat(match[1]);
+    const lon = parseFloat(match[2]);
+    return [{
+      name: placeName,
+      address: `Location from Google Maps pin (${lat.toFixed(5)}, ${lon.toFixed(5)})`,
+      lat,
+      lon,
+      source: "Google Maps Link",
+    }];
+  }
+
+  return null;
+}
 
 function adaptMultiShiftResponse(shifts, destination) {
   const routes = [];
@@ -265,6 +295,8 @@ export default function App() {
     setDestination(null);
     setConfirmedDropoff(null);
     setSelectedTimeShift("");
+    setDropoffCandidates([]);
+    setDropoffSearchText("");
     setShowDropoffModal(true);
   };
 
@@ -369,54 +401,99 @@ export default function App() {
     }
   };
 
-  // Drop-off Location Search with instant fallback to verified facilities
+  // Live Drop-off Location Search using Google Places API (no hardcoded data)
   useEffect(() => {
     const controller = new AbortController();
-    const query = (dropoffSearchText || "").trim().toLowerCase();
-
-    // Find any local preset facility matches immediately
-    const matchedPresets = PRESET_FACILITIES.filter(
-      (f) =>
-        !query ||
-        f.name.toLowerCase().includes(query) ||
-        f.address.toLowerCase().includes(query) ||
-        "jcb talegaon pune plant factory".includes(query)
-    );
+    const query = (dropoffSearchText || "").trim();
 
     if (!query) {
-      setDropoffCandidates(PRESET_FACILITIES);
+      setDropoffCandidates([]);
       setDropoffSearchError("");
       setIsSearchingDropoff(false);
       return;
     }
 
-    if (matchedPresets.length > 0) {
-      setDropoffCandidates(matchedPresets);
+    // Check if input is a pasted Google Maps link or raw coordinates
+    const parsedLink = parseGoogleMapsLinkOrCoords(query);
+    if (parsedLink) {
+      setDropoffCandidates(parsedLink);
+      setDropoffSearchError("");
+      setIsSearchingDropoff(false);
+      return;
+    }
+
+    if (query.length < 2) {
+      setDropoffCandidates([]);
+      setIsSearchingDropoff(false);
+      return;
     }
 
     setDropoffSearchError("");
     const timer = setTimeout(async () => {
       setIsSearchingDropoff(true);
       try {
-        const res = await authenticatedFetch(
-          `/api/dropoff/search?q=${encodeURIComponent(query)}`,
-          { signal: controller.signal },
-          getToken,
-        );
-        if (res.ok) {
-          const payload = await res.json();
-          if (Array.isArray(payload) && payload.length > 0) {
-            setDropoffCandidates(payload);
-          } else if (matchedPresets.length === 0) {
-            setDropoffCandidates([]);
+        let places = [];
+        // First try the backend search endpoint
+        try {
+          const res = await authenticatedFetch(
+            `/api/dropoff/search?q=${encodeURIComponent(query)}`,
+            { signal: controller.signal },
+            getToken,
+          );
+          if (res.ok) {
+            const payload = await res.json();
+            if (Array.isArray(payload) && payload.length > 0) {
+              places = payload;
+            }
           }
+        } catch (backendErr) {
+          if (backendErr.name === "AbortError") throw backendErr;
+          console.warn("Backend dropoff search notice:", backendErr);
+        }
+
+        // If backend returned no results or is deploying, query Google Places API directly
+        if (!places || places.length === 0) {
+          const googleKey = import.meta.env.VITE_GOOGLE_MAPS_API_KEY;
+          if (googleKey) {
+            const googleRes = await fetch("https://places.googleapis.com/v1/places:searchText", {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                "X-Goog-Api-Key": googleKey,
+                "X-Goog-FieldMask": "places.id,places.displayName,places.formattedAddress,places.location",
+              },
+              body: JSON.stringify({
+                textQuery: query,
+                languageCode: "en",
+                regionCode: "IN",
+                maxResultCount: 6,
+              }),
+              signal: controller.signal,
+            });
+
+            if (googleRes.ok) {
+              const gData = await googleRes.json();
+              places = (gData.places || [])
+                .map((p) => ({
+                  name: p.displayName?.text || "Unnamed Place",
+                  address: p.formattedAddress || "",
+                  lat: p.location?.latitude,
+                  lon: p.location?.longitude,
+                  place_id: p.id,
+                  source: "Google Places (Live)",
+                }))
+                .filter((p) => p.lat != null && p.lon != null);
+            }
+          }
+        }
+
+        if (!controller.signal.aborted) {
+          setDropoffCandidates(places || []);
         }
       } catch (err) {
         if (err.name !== "AbortError") {
-          console.warn("Drop-off search warning:", err);
-          if (matchedPresets.length === 0) {
-            setDropoffCandidates(PRESET_FACILITIES);
-          }
+          console.warn("Drop-off search error:", err);
+          setDropoffCandidates([]);
         }
       } finally {
         if (!controller.signal.aborted) setIsSearchingDropoff(false);
@@ -934,13 +1011,13 @@ export default function App() {
                     <div className="dropoff-search-message">Searching places…</div>
                   ) : dropoffSearchText.trim().length >= 2 ? (
                     <div className="dropoff-search-message">
-                      <span>No places found.</span>
+                      <span>No places found for &ldquo;{dropoffSearchText}&rdquo;.</span>
                       <a href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(dropoffSearchText)}`} target="_blank" rel="noreferrer">
                         Search in Google Maps <ExternalLink size={13} />
                       </a>
                     </div>
                   ) : (
-                    <div className="dropoff-search-message">Search by name or paste a Google Maps place link.</div>
+                    <div className="dropoff-search-message">Search by facility name (e.g. JCB Talegaon, Infosys Pune) or paste a Google Maps link.</div>
                   )}
                 </div>
               </div>
