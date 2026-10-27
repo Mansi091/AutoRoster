@@ -914,7 +914,7 @@ export default function App() {
   const pageMeta = activeTab === "history"
     ? { title: "Roster history", sub: "Plans you have saved, ready to download again." }
     : !clustering
-      ? { title: "Plan employee transport", sub: "Upload a roster, confirm the drop-off and build routes." }
+      ? { title: "Automate Rostering", sub: "Upload a roster, confirm the drop-off and build routes." }
       : activeTab === "routes"
         ? { title: "Route review", sub: "Check journey times, then open a route to see its pickup list." }
         : activeTab === "employees"
