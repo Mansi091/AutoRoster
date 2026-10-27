@@ -531,12 +531,11 @@ export default function RouteMap({
                   </span>
                   <span className="route-metric-shift">Shift {String(r.shift).replace("Shift ", "")}</span>
                 </div>
-                <div className="route-metric-corridor" title={r.corridor || "Local"}>{r.corridor || "Local"}</div>
                 <div className="route-metric-stats">
-                  <span className="route-metric-stat"><strong>{r.passengers_assigned}</strong><small>pax</small></span>
-                  <span className="route-metric-stat"><strong>{distanceDisplay ?? "—"}</strong><small>km</small></span>
+                  <span className="route-metric-stat"><strong>{r.passengers_assigned}</strong><small>people</small></span>
+                  <span className="route-metric-stat"><strong>{distanceDisplay == null ? "—" : Number(distanceDisplay).toFixed(1)}</strong><small>km</small></span>
                   <span className={`route-metric-stat route-metric-time ${Number(timeDisplay) > 70 ? "is-over-limit" : ""}`}>
-                    <strong>{timeDisplay == null ? "—" : Number(timeDisplay).toFixed(1)}</strong><small>ride min</small>
+                    <strong>{timeDisplay == null ? "—" : Math.round(Number(timeDisplay))}</strong><small>min</small>
                   </span>
                 </div>
               </button>

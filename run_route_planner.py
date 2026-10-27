@@ -1224,13 +1224,37 @@ def generate_transport_roster_workbook(
     print(f"\n[Workbook Generated] Saved full multi-shift transport roster to:\n  {output_path}")
 
 
+def _primary_shift(shift_value: str) -> str:
+    shift_text = str(shift_value).upper()
+    if "A" in shift_text:
+        return "A"
+    if "B" in shift_text:
+        return "B"
+    if "C" in shift_text:
+        return "C"
+    return "A"
+
+
+def _filter_roster_to_shift(df: pd.DataFrame, shift_filter: str) -> pd.DataFrame:
+    if shift_filter == "ALL":
+        return df
+    if "Shift" not in df.columns:
+        return df if shift_filter == "A" else df.iloc[0:0]
+    return df[df["Shift"].map(_primary_shift) == shift_filter].copy()
+
+
 def run_full_pipeline(
     roster_excel_path: Path,
     output_excel_path: Path,
     facility: Optional[Dict[str, Any]] = None,
     pickup_resolver=None,
     shift_deadlines: Optional[Dict[str, int]] = None,
+    shift_filter: str = "ALL",
 ):
+    shift_filter = str(shift_filter or "ALL").strip().upper()
+    if shift_filter != "ALL" and shift_filter not in {"A", "B", "C"}:
+        raise ValueError("Choose All shifts or a valid shift.")
+
     print("=" * 70)
     print("STARTING MULTI-SHIFT VRP ROUTE PLANNING PIPELINE")
     print(f"Roster File: {roster_excel_path}")
@@ -1245,6 +1269,7 @@ def run_full_pipeline(
     # Read roster Excel
     df = pd.read_excel(roster_excel_path, header=1)
     df = df.dropna(how="all").reset_index(drop=True)
+    planning_df = _filter_roster_to_shift(df, shift_filter)
 
     # Resolve unique roster stop labels missing from the verified stop cache.
     # The resolver uses Geoapify first and LocationIQ as a cross-check/fallback.
@@ -1252,7 +1277,7 @@ def run_full_pipeline(
     if pickup_resolver:
         raw_names = list(dict.fromkeys(
             str(value).strip()
-            for value in df.get("Bus Stop", pd.Series(dtype=str)).tolist()
+            for value in planning_df.get("Bus Stop", pd.Series(dtype=str)).tolist()
             if str(value).strip() and str(value).strip().lower() != "nan"
         ))
         unmatched_names = []
@@ -1287,7 +1312,7 @@ def run_full_pipeline(
             )
 
     all_employees = []
-    for idx, r in df.iterrows():
+    for idx, r in planning_df.iterrows():
         all_employees.append({
             "sr_no": idx + 1,
             "emp_type": str(r.get("GRADE", "DET")).strip(),
@@ -1297,16 +1322,10 @@ def run_full_pipeline(
             "mobile": str(r.get("Mob. No.", "")).replace(".0", "").strip(),
         })
 
-    def map_primary_shift(s_val: str) -> str:
-        s = str(s_val).upper()
-        if "A" in s: return "A"
-        if "B" in s: return "B"
-        if "C" in s: return "C"
-        return "A"
-
     all_results = []
-    for shift_key in ["A", "B", "C"]:
-        shift_emps = [e for e in all_employees if map_primary_shift(e["shift"]) == shift_key]
+    shift_keys = ["A", "B", "C"] if shift_filter == "ALL" else [shift_filter]
+    for shift_key in shift_keys:
+        shift_emps = [e for e in all_employees if _primary_shift(e["shift"]) == shift_key]
         res = solve_shift_routes(
             shift_key,
             shift_emps,

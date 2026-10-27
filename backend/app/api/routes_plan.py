@@ -210,6 +210,13 @@ async def plan_multi_shift(request: Request, user: dict = Depends(require_authen
             "lon": float(dropoff["lon"]),
         }
 
+        shift_filter = str(form.get("shift_filter") or "ALL").strip().upper()
+        if shift_filter != "ALL" and shift_filter not in config.SHIFT_ARRIVAL_DEADLINES:
+            return JSONResponse(
+                {"status": "ERROR", "error": "Choose All shifts or a valid shift."},
+                status_code=400,
+            )
+
         submitted_start_times = form.get("shift_start_times")
         shift_deadlines = dict(config.SHIFT_ARRIVAL_DEADLINES)
         if submitted_start_times:
@@ -240,6 +247,7 @@ async def plan_multi_shift(request: Request, user: dict = Depends(require_authen
             facility,
             resolve_roster_pickup_coordinates,
             shift_deadlines,
+            shift_filter,
         )
         all_routes = [route for shift in results for route in shift.get("routes", [])]
 
