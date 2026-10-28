@@ -4,18 +4,16 @@ import { fetchRoadRoute } from "../utils/routing";
 import { X } from "lucide-react";
 
 const ROUTE_COLORS = [
-  "#5B6EE1", // indigo
-  "#3FA796", // teal
-  "#E39A4B", // amber
-  "#9A7BDB", // violet
-  "#E5607A", // rose
-  "#4E9BD0", // sky
-  "#7FB069", // sage
-  "#D9B44A", // gold
-  "#C46FB3", // orchid
-  "#6C7A99", // slate
-  "#3FBFD0", // cyan
-  "#E07B5F", // coral
+  "#2563EB", // Blue
+  "#0D9488", // Teal
+  "#EA580C", // Amber
+  "#7C3AED", // Violet
+  "#E11D48", // Rose
+  "#0284C7", // Sky
+  "#4F46E5", // Indigo
+  "#16A34A", // Emerald
+  "#D97706", // Ochre
+  "#64748B", // Slate
 ];
 
 export default function RouteMap({
@@ -66,10 +64,22 @@ export default function RouteMap({
   // Available unique corridors
   const corridors = useMemo(() => {
     const set = new Set();
-    routes.forEach((r) => {
+    (routes || []).forEach((r) => {
       if (r.corridor) set.add(r.corridor);
     });
     return ["ALL", ...Array.from(set)];
+  }, [routes]);
+
+  // Route counts per shift
+  const shiftCounts = useMemo(() => {
+    const counts = { ALL: (routes || []).length, A: 0, B: 0, C: 0 };
+    (routes || []).forEach((r) => {
+      const s = (r.shift || "").toUpperCase();
+      if (s.includes("A")) counts.A += 1;
+      if (s.includes("B")) counts.B += 1;
+      if (s.includes("C")) counts.C += 1;
+    });
+    return counts;
   }, [routes]);
 
   // Filter routes by shift and corridor
@@ -187,7 +197,7 @@ export default function RouteMap({
         className: "dest-marker",
         html: `
           <div style="
-            background: #E5607A;
+            background: #DC2626;
             color: #fff;
             width: 32px;
             height: 32px;
@@ -196,7 +206,7 @@ export default function RouteMap({
             align-items: center;
             justify-content: center;
             border: 3px solid #ffffff;
-            box-shadow: 0 4px 12px rgba(229, 96, 122, 0.45);
+            box-shadow: 0 3px 8px rgba(220, 38, 38, 0.5);
           ">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
               <path d="M20 10c0 6-8 12-8 12s-8-6-8-12a8 8 0 0 1 16 0Z"/>
@@ -209,8 +219,8 @@ export default function RouteMap({
       });
 
       const destMarker = L.marker(destPt, { icon: destIcon, zIndexOffset: 1000 }).bindPopup(`
-        <div style="font-family:Inter,sans-serif; font-size:12px; line-height:1.4;">
-          <div style="font-weight:800; color:#B8415A; font-size:13px; margin-bottom:2px;">
+        <div style="font-family:sans-serif; font-size:12px; line-height:1.4;">
+          <div style="font-weight:800; color:#DC2626; font-size:13px; margin-bottom:2px;">
             ${destination.name || "Company Plant"}
           </div>
           <div style="color:#0F172A; font-weight:600;">Main Drop Location</div>
@@ -274,13 +284,18 @@ export default function RouteMap({
         // Route line click toggles selection
         routeLine.on("click", () => {
           setSelectedStopData(null);
-          const next = selectedBusIds.includes(route.bus_id)
-            ? selectedBusIds.filter((id) => id !== route.bus_id)
-            : [...selectedBusIds, route.bus_id];
-          setSelectedBusIds(next);
-          if (onSelectBus) {
-            onSelectBus(next.length === 1 ? next[0] : next.length > 1 ? next.join(",") : null);
-          }
+          setSelectedBusIds((prev) => {
+            let next;
+            if (prev.includes(route.bus_id)) {
+              next = prev.filter((id) => id !== route.bus_id);
+            } else {
+              next = [...prev, route.bus_id];
+            }
+            if (onSelectBus) {
+              onSelectBus(next.length === 1 ? next[0] : next.length > 1 ? next.join(",") : null);
+            }
+            return next;
+          });
         });
 
         layersRef.current.push(routeLine);
@@ -300,8 +315,8 @@ export default function RouteMap({
             .map(
               (e) =>
                 `<div style="margin-top:3px; padding-left:4px; border-left:2px solid ${color};">
-                  <b>${e.employee_name || e.emp_name || "Employee"}</b> (${e.shift || route.shift})<br/>
-                  <span style="color:#64748B;">ID: ${e.employee_id || e.sr_no || "-"} | Mob: ${e.mobile || "-"}</span>
+                  <b>${e.employee_name}</b> (${e.shift})<br/>
+                  <span style="color:#64748B;">ID: ${e.employee_id || "-"} | Mob: ${e.mobile || "-"}</span>
                 </div>`
             )
             .join("");
@@ -310,7 +325,7 @@ export default function RouteMap({
             className: "custom-stop-marker",
             html: `
               <div style="
-                background: ${isSelectedStop ? "#E5607A" : isHoveredStop ? "#E39A4B" : color};
+                background: ${isSelectedStop ? "#EF4444" : isHoveredStop ? "#F59E0B" : color};
                 color: #ffffff;
                 width: ${isFocused || isSelectedStop ? "28px" : "24px"};
                 height: ${isFocused || isSelectedStop ? "28px" : "24px"};
@@ -321,7 +336,7 @@ export default function RouteMap({
                 font-size: 11px;
                 font-weight: 800;
                 border: 2px solid #ffffff;
-                box-shadow: 0 2px 8px rgba(31,42,68,0.28);
+                box-shadow: 0 2px 6px rgba(0,0,0,0.35);
                 transition: transform 0.2s;
               ">
                 ${s.seq}
@@ -335,7 +350,7 @@ export default function RouteMap({
             icon: markerIcon,
             zIndexOffset: isFocused || isSelectedStop ? 500 : 0,
           }).bindPopup(`
-            <div style="font-family:Inter,sans-serif; font-size:12px; line-height: 1.4; min-width: 220px; max-width: 280px;">
+            <div style="font-family:sans-serif; font-size:12px; line-height: 1.4; min-width: 220px; max-width: 280px;">
               <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
                 <span style="font-size:13px; font-weight:800; color:${color};">
                   ${route.bus_id} (${route.shift})
@@ -349,9 +364,9 @@ export default function RouteMap({
               </div>
               <div style="color:#475569; font-size:11px;">
                 <b>Distance from prev stop:</b> ${s.distance_from_prev_km > 0 ? `+${s.distance_from_prev_km} km` : "Start (First stop)"}<br/>
-                <b>Distance to plant:</b> ${s.distance_to_destination_km ?? "—"} km
+                <b>Distance to plant:</b> ${s.distance_to_destination_km} km
               </div>
-              <div style="margin-top:8px; padding-top:6px; border-top:1px solid #E6EAF2; font-size:11px;">
+              <div style="margin-top:8px; padding-top:6px; border-top:1px solid #E2E8F0; font-size:11px;">
                 <b style="color:#1E293B;">Employees Boarding Here (${employeeList.length}):</b>
                 <div style="max-height:130px; overflow-y:auto; margin-top:4px;">
                   ${employeeNamesHtml}
@@ -391,46 +406,36 @@ export default function RouteMap({
     }, 200);
   }, [displayedRoutes, destination, selectedBusIds, roadStatsMap, hoveredEmployee, selectedStopData]);
 
-  const clearSelection = () => {
-    setSelectedBusIds([]);
-    setSelectedStopData(null);
-    if (onSelectBus) onSelectBus(null);
-  };
-
-  const toggleBus = (busId) => {
-    setSelectedStopData(null);
-    const next = selectedBusIds.includes(busId)
-      ? selectedBusIds.filter((id) => id !== busId)
-      : [...selectedBusIds, busId];
-    setSelectedBusIds(next);
-    if (onSelectBus) {
-      onSelectBus(next.length === 1 ? next[0] : next.length > 1 ? next.join(",") : null);
-    }
-  };
-
   return (
     <div className="route-map-shell">
-      {/* Filters */}
+      {/* Top Controls Bar */}
       <div className="filter-bar">
+        {/* Shift Filter */}
         <div className="filter-group">
           <span className="filter-label">Shift</span>
           <div className="seg">
-            {["ALL", "A", "B", "C"].map((sh) => (
-              <button
-                key={sh}
-                className={`seg-btn ${selectedShift === sh ? "active" : ""}`}
-                onClick={() => {
-                  setSelectedShift(sh);
-                  setSelectedBusIds([]);
-                  if (onSelectBus) onSelectBus(null);
-                }}
-              >
-                {sh === "ALL" ? "All" : sh}
-              </button>
-            ))}
+            {["ALL", "A", "B", "C"].map((sh) => {
+              const count = shiftCounts[sh] || 0;
+              const label = sh === "ALL" ? `All (${count})` : `${sh} (${count})`;
+              return (
+                <button
+                  key={sh}
+                  className={`seg-btn ${selectedShift === sh ? "active" : ""}`}
+                  onClick={() => {
+                    setSelectedShift(sh);
+                    setSelectedBusIds([]);
+                    if (onSelectBus) onSelectBus(null);
+                  }}
+                  title={sh === "ALL" ? `All shifts (${count} routes)` : `Shift ${sh} (${count} routes)`}
+                >
+                  {label}
+                </button>
+              );
+            })}
           </div>
         </div>
 
+        {/* Corridor Filter */}
         <div className="filter-group">
           <span className="filter-label">Corridor</span>
           <select
@@ -443,148 +448,329 @@ export default function RouteMap({
             }}
           >
             {corridors.map((c) => (
-              <option key={c} value={c}>{c === "ALL" ? "All corridors" : c}</option>
+              <option key={c} value={c}>
+                {c === "ALL" ? "All Corridors" : c}
+              </option>
             ))}
           </select>
         </div>
 
+        {/* Bus Route Selector */}
+        <div className="filter-group">
+          <span className="filter-label">Bus</span>
+          <select
+            className="select-field"
+            value={selectedBusIds.length === 1 ? selectedBusIds[0] : selectedBusIds.length > 1 ? "CUSTOM" : "ALL"}
+            onChange={(e) => {
+              const val = e.target.value;
+              setSelectedStopData(null);
+              if (val === "ALL") {
+                setSelectedBusIds([]);
+                if (onSelectBus) onSelectBus(null);
+              } else if (val !== "CUSTOM") {
+                setSelectedBusIds([val]);
+                if (onSelectBus) onSelectBus(val);
+              }
+            }}
+          >
+            <option value="ALL">All Routes ({displayedRoutes.length})</option>
+            {selectedBusIds.length > 1 && (
+              <option value="CUSTOM">
+                ★ {selectedBusIds.length} Routes Selected ({selectedBusIds.join(", ")})
+              </option>
+            )}
+            {displayedRoutes.map((r) => (
+              <option key={r.bus_id} value={r.bus_id}>
+                {r.bus_id} — {r.corridor || "Central"}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        {/* Quick "Show All" toggle button */}
         {selectedBusIds.length > 0 && (
-          <button className="btn btn-ghost btn-sm" onClick={clearSelection}>Show all routes</button>
+          <button
+            className="btn btn-ghost"
+            onClick={() => {
+              setSelectedBusIds([]);
+              setSelectedStopData(null);
+              if (onSelectBus) onSelectBus(null);
+            }}
+          >
+            Show all routes
+          </button>
         )}
 
+        {/* Legend & Routing Status */}
         <div className="filter-legend">
           {isLoadingRoads && (
-            <span className="routing-status"><span className="spinner" /> Routing roads…</span>
+            <span className="routing-status">
+              <span className="spinner" />
+              Routing roads…
+            </span>
           )}
           <span className="legend-item">
-            <span className="legend-dot" style={{ background: "#E5607A" }} /> Drop location
+            <span className="legend-dot" style={{ background: "#DC2626" }} />
+            Drop location
           </span>
-          <span className="legend-item">{displayedRoutes.length} {displayedRoutes.length === 1 ? "route" : "routes"}</span>
         </div>
       </div>
 
-      {/* Comparison */}
+      {/* Multi-Route Comparison Banner (Shown when 2 or more routes are selected) */}
       {selectedBusIds.length >= 2 && (
-        <div className="compare-bar">
-          <div className="compare-left">
-            <span className="compare-title">Comparing {selectedBusIds.length} routes</span>
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            flexWrap: "wrap",
+            gap: 10,
+            padding: "10px 14px",
+            marginBottom: 12,
+            background: "#F0F9FF",
+            border: "1px solid #BAE6FD",
+            borderRadius: "10px",
+            animation: "fadeIn 0.2s ease-in-out",
+          }}
+        >
+          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+            <span style={{ fontWeight: 800, color: "#0284C7", fontSize: "12px", textTransform: "uppercase", letterSpacing: "0.5px" }}>
+              Comparing {selectedBusIds.length} Routes:
+            </span>
             {selectedBusIds.map((id) => {
               const r = routes.find((rt) => rt.bus_id === id);
+              const c = getBusColor(id);
               return (
-                <span key={id} className="compare-chip" style={{ "--chip": getBusColor(id) }}>
-                  <span className="legend-dot" style={{ background: getBusColor(id) }} />
+                <span
+                  key={id}
+                  style={{
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: 6,
+                    padding: "3px 10px",
+                    background: "#FFFFFF",
+                    border: `2px solid ${c}`,
+                    borderRadius: "20px",
+                    fontWeight: 700,
+                    fontSize: "12px",
+                    color: "#0F172A",
+                    boxShadow: "0 1px 3px rgba(0,0,0,0.06)",
+                  }}
+                >
+                  <span style={{ width: 8, height: 8, borderRadius: "50%", background: c }} />
                   {id}
-                  {r && <em>{r.passengers_assigned} pax</em>}
+                  {r && <span style={{ color: "#64748B", fontWeight: 500 }}>({r.passengers_assigned} pax)</span>}
                   <button
-                    type="button"
-                    title={`Remove ${id}`}
-                    aria-label={`Remove ${id}`}
                     onClick={(e) => {
                       e.stopPropagation();
                       const next = selectedBusIds.filter((b) => b !== id);
                       setSelectedBusIds(next);
                       if (onSelectBus) onSelectBus(next.length === 1 ? next[0] : null);
                     }}
+                    style={{
+                      background: "none",
+                      border: "none",
+                      cursor: "pointer",
+                      padding: "0 2px",
+                      color: "#94A3B8",
+                      fontWeight: 800,
+                      fontSize: "12px",
+                      lineHeight: 1,
+                    }}
+                    title={`Remove ${id}`}
                   >
-                    <X size={12} />
+                    ✕
                   </button>
                 </span>
               );
             })}
           </div>
-          <div className="compare-right">
-            <span>
-              Combined pax: <b>{selectedBusIds.reduce((sum, id) => sum + (routes.find((rt) => rt.bus_id === id)?.passengers_assigned || 0), 0)}</b>
+          <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+            <span style={{ fontSize: "12px", color: "#0369A1", fontWeight: 600 }}>
+              Combined Pax: <b>{
+                selectedBusIds.reduce((sum, id) => {
+                  const r = routes.find((rt) => rt.bus_id === id);
+                  return sum + (r?.passengers_assigned || 0);
+                }, 0)
+              }</b>
             </span>
-            <button className="btn btn-ghost btn-sm" onClick={clearSelection}>Reset</button>
+            <button
+              className="btn btn-ghost"
+              style={{ fontSize: "12px", padding: "4px 8px", color: "#0284C7" }}
+              onClick={() => {
+                setSelectedBusIds([]);
+                setSelectedStopData(null);
+                if (onSelectBus) onSelectBus(null);
+              }}
+            >
+              Reset to all
+            </button>
           </div>
         </div>
       )}
 
-      <div className="map-split">
-        {/* Route list */}
-        <div className="route-metrics" role="list" aria-label="Routes">
-          {displayedRoutes.map((r) => {
-            const color = getBusColor(r.bus_id);
-            const stat = roadStatsMap[r.bus_id];
-            const isSelected = selectedBusIds.includes(r.bus_id);
-            const distanceDisplay = stat?.distanceKm ?? r.total_km;
-            // Use the backend's full longest-ride estimate (including stop dwell).
-            // The map router's drive-only time is not the passenger ride duration.
-            const timeDisplay = r.longest_ride_minutes;
+      {/* Route Metric Cards Bar: Click to select / compare multiple buses */}
+      <div className="route-metrics">
+        {displayedRoutes.length === 0 ? (
+          <div
+            style={{
+              padding: "24px 16px",
+              textAlign: "center",
+              color: "#64748B",
+              fontSize: "13px",
+              background: "#F8FAFC",
+              borderRadius: "10px",
+              border: "1px dashed #CBD5E1",
+              margin: "6px 0",
+              width: "100%",
+            }}
+          >
+            <p style={{ fontWeight: 700, color: "#1E293B", marginBottom: "4px" }}>
+              No routes planned for Shift {selectedShift}
+            </p>
+            <p style={{ margin: 0, fontSize: "12px", lineHeight: 1.4 }}>
+              {shiftCounts.ALL > 0
+                ? `Current roster only contains ${shiftCounts.ALL} route(s) for active shifts. Switch back to 'All (${shiftCounts.ALL})' or re-plan with 'All shifts (A, B, C)' to generate routes for all shifts.`
+                : "No routes available."}
+            </p>
+          </div>
+        ) : displayedRoutes.map((r) => {
+          const color = getBusColor(r.bus_id);
+          const stat = roadStatsMap[r.bus_id];
+          const isSelected = selectedBusIds.includes(r.bus_id);
 
-            return (
-              <button
-                type="button"
-                key={r.bus_id}
-                role="listitem"
-                className={`route-metric ${isSelected ? "selected" : ""}`}
-                style={{ "--route-color": color }}
-                aria-pressed={isSelected}
-                aria-label={`${isSelected ? "Deselect" : "Select"} ${r.shift} route ${r.route_no}`}
-                onClick={() => toggleBus(r.bus_id)}
+          const distanceDisplay = stat?.distanceKm ?? r.total_km;
+          // Use the backend's full longest-ride estimate (including stop dwell).
+          // The map router's drive-only time is not the passenger ride duration.
+          const timeDisplay = r.longest_ride_minutes;
+
+          return (
+            <button
+              type="button"
+              key={r.bus_id}
+              className={`route-metric ${isSelected ? "selected" : ""}`}
+              style={{ "--route-color": color }}
+              aria-pressed={isSelected}
+              aria-label={`${isSelected ? "Deselect" : "Select"} ${r.shift} route ${r.route_no}`}
+              onClick={() => {
+                setSelectedStopData(null);
+                setSelectedBusIds((prev) => {
+                  let next;
+                  if (prev.includes(r.bus_id)) {
+                    // Deselect
+                    next = prev.filter((id) => id !== r.bus_id);
+                  } else {
+                    // Add to multi-selection
+                    next = [...prev, r.bus_id];
+                  }
+                  if (onSelectBus) {
+                    onSelectBus(next.length === 1 ? next[0] : next.length > 1 ? next.join(",") : null);
+                  }
+                  return next;
+                });
+              }}
+            >
+              <div className="route-metric-head">
+                <span className="route-metric-name">
+                  <span className="legend-dot" style={{ background: color }} />
+                  Route {r.route_no}
+                </span>
+                <span className="route-metric-shift">{r.shift.replace("Shift ", "")}</span>
+                <span className="route-metric-select" aria-hidden="true" />
+              </div>
+              <div className="route-metric-stats">
+                <span className="route-metric-stat"><strong>{r.passengers_assigned}</strong><small>people</small></span>
+                <span className="route-metric-stat"><strong>{distanceDisplay == null ? "—" : Number(distanceDisplay).toFixed(1)}</strong><small>km</small></span>
+                <span className={`route-metric-stat route-metric-time ${Number(timeDisplay) > 70 ? "is-over-limit" : ""}`}>
+                  <strong>{timeDisplay == null ? "—" : Math.round(Number(timeDisplay))}</strong><small>min</small>
+                </span>
+              </div>
+            </button>
+          );
+        })}
+      </div>
+
+      {/* The Leaflet Map Canvas */}
+      <div
+        className="route-map-canvas"
+        ref={mapRef}
+      />
+
+      {/* Selected Stop & Assigned Employee Details Drawer */}
+      {selectedStopData && (
+        <div
+          style={{
+            marginTop: 14,
+            padding: "14px 18px",
+            background: "#F8FAFC",
+            borderRadius: "10px",
+            border: `1px solid ${selectedStopData.color}40`,
+            boxShadow: "0 1px 3px rgba(0,0,0,0.04)",
+          }}
+        >
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <div
+                style={{
+                  background: selectedStopData.color,
+                  color: "#fff",
+                  width: 24,
+                  height: 24,
+                  borderRadius: "50%",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  fontSize: "11px",
+                  fontWeight: 800,
+                }}
               >
-                <div className="route-metric-head">
-                  <span className="route-metric-name">
-                    <span className="legend-dot" style={{ background: color }} />
-                    Route {r.route_no}
-                  </span>
-                  <span className="route-metric-shift">Shift {String(r.shift).replace("Shift ", "")}</span>
-                </div>
-                <div className="route-metric-stats">
-                  <span className="route-metric-stat"><strong>{r.passengers_assigned}</strong><small>people</small></span>
-                  <span className="route-metric-stat"><strong>{distanceDisplay == null ? "—" : Number(distanceDisplay).toFixed(1)}</strong><small>km</small></span>
-                  <span className={`route-metric-stat route-metric-time ${Number(timeDisplay) > 70 ? "is-over-limit" : ""}`}>
-                    <strong>{timeDisplay == null ? "—" : Math.round(Number(timeDisplay))}</strong><small>min</small>
-                  </span>
-                </div>
-              </button>
-            );
-          })}
-        </div>
-
-        {/* Map */}
-        <div className="map-stage">
-          <div className="route-map-canvas" ref={mapRef} />
-
-          {selectedStopData && (
-            <div className="stop-drawer">
-              <div className="stop-drawer-head">
-                <div className="stop-drawer-title">
-                  <span className="stop-seq" style={{ background: selectedStopData.color }}>{selectedStopData.seq}</span>
-                  <div>
-                    <strong>{selectedStopData.stop_name}</strong>
-                    <span>
-                      <b style={{ color: selectedStopData.color }}>{selectedStopData.bus_id}</b>
-                      {selectedStopData.pickup_time ? ` · pickup ${selectedStopData.pickup_time}` : ""}
-                    </span>
-                  </div>
-                </div>
-                <button type="button" className="icon-btn" onClick={() => setSelectedStopData(null)} aria-label="Close stop details">
-                  <X size={16} />
-                </button>
+                {selectedStopData.seq}
               </div>
-
-              <div className="stop-drawer-count">
-                Boarding at this stop ({selectedStopData.employees.length})
-              </div>
-
-              <div className="emp-grid">
-                {selectedStopData.employees.map((emp, i) => (
-                  <div key={i} className="emp-card">
-                    <strong>{emp.employee_name || emp.emp_name || "Employee"}</strong>
-                    <div>
-                      <span>ID <b>{emp.employee_id || emp.sr_no || "-"}</b></span>
-                      <span>Shift <b>{emp.shift || selectedStopData.shift}</b></span>
-                      <span><b>{emp.mobile && emp.mobile !== "nan" ? emp.mobile : "-"}</b></span>
-                    </div>
-                  </div>
-                ))}
+              <div>
+                <span style={{ fontWeight: 800, color: "#0F172A", fontSize: "0.95rem" }}>
+                  {selectedStopData.stop_name}
+                </span>
+                <span style={{ marginLeft: 10, fontSize: "0.8rem", color: "#64748B" }}>
+                  Assigned to <b style={{ color: selectedStopData.color }}>{selectedStopData.bus_id}</b> ({selectedStopData.shift})
+                </span>
               </div>
             </div>
-          )}
+            <button
+              onClick={() => setSelectedStopData(null)}
+              style={{ background: "transparent", border: "none", cursor: "pointer", color: "#64748B" }}
+            >
+              <X size={16} />
+            </button>
+          </div>
+
+          <div style={{ fontSize: "0.82rem", fontWeight: 700, color: "#334155", marginBottom: 6 }}>
+            Employees Boarding at this Stop ({selectedStopData.employees.length}):
+          </div>
+
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))", gap: 10 }}>
+            {selectedStopData.employees.map((emp, i) => (
+              <div
+                key={i}
+                style={{
+                  background: "#FFFFFF",
+                  padding: "10px 14px",
+                  borderRadius: "8px",
+                  border: "1px solid #E2E8F0",
+                }}
+              >
+                <div style={{ fontWeight: 800, color: "#0F172A", fontSize: "0.88rem" }}>
+                  {emp.employee_name}
+                </div>
+                <div style={{ fontSize: "0.78rem", color: "#64748B", marginTop: 2, display: "flex", justifyContent: "space-between" }}>
+                  <span>ID: <b>{emp.employee_id || "-"}</b></span>
+                  <span>Shift: <b>{emp.shift}</b></span>
+                  <span>Mob: <b>{emp.mobile || "-"}</b></span>
+                </div>
+              </div>
+            ))}
+          </div>
         </div>
-      </div>
+      )}
     </div>
   );
 }

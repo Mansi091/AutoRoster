@@ -191,7 +191,7 @@ export default function App() {
   const [corridorFilter, setCorridorFilter] = useState("ALL");
   const [searchQuery, setSearchQuery] = useState("");
   const [shiftStartTimes, setShiftStartTimes] = useState({});
-  const [selectedTimeShift, setSelectedTimeShift] = useState("");
+  const [selectedTimeShift, setSelectedTimeShift] = useState("ALL");
   const [plannedRosterFile, setPlannedRosterFile] = useState(null);
   const [plannedShiftStartTimes, setPlannedShiftStartTimes] = useState(null);
   const [arrivalBufferMinutes, setArrivalBufferMinutes] = useState(null);
@@ -846,8 +846,9 @@ export default function App() {
     ? Math.min(100, Math.round((clustering.routed_employees / clustering.total_employees) * 100))
     : 0;
   const hasPendingRoster = Boolean(uploadedRosterFile && uploadedRosterFile !== plannedRosterFile);
+  const effectiveShiftChoice = selectedTimeShift || "ALL";
   const canBuildRoutes = Boolean(
-    hasPendingRoster && destination && selectedTimeShift &&
+    hasPendingRoster && destination && effectiveShiftChoice &&
     Object.keys(shiftStartTimes).length > 0 &&
     Object.values(shiftStartTimes).every((time) => /^([01]\d|2[0-3]):[0-5]\d$/.test(time || "")) &&
     !isOptimising
@@ -897,12 +898,12 @@ export default function App() {
   const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
   const shiftTimesValid = Object.keys(shiftStartTimes).length > 0 &&
     Object.values(shiftStartTimes).every((time) => TIME_RE.test(time || ""));
-  const hasShiftChoice = Boolean(selectedTimeShift) && shiftTimesValid;
+  const hasShiftChoice = Boolean(effectiveShiftChoice) && shiftTimesValid;
 
   const setupSteps = [
     { title: "Upload roster", hint: uploadedRosterFile ? uploadedRosterFile.name : "Excel .xlsx or .xls", done: Boolean(uploadedRosterFile) },
     { title: "Drop-off facility", hint: destination ? destination.name : "Search and confirm", done: Boolean(destination) },
-    { title: "Shift", hint: hasShiftChoice ? (selectedTimeShift === "ALL" ? "All shifts" : `Shift ${selectedTimeShift}`) : "Pick a shift", done: hasShiftChoice },
+    { title: "Shift", hint: hasShiftChoice ? (effectiveShiftChoice === "ALL" ? "All shifts" : `Shift ${effectiveShiftChoice}`) : "All shifts", done: hasShiftChoice },
     { title: "Build routes", hint: canBuildRoutes ? "Ready when you are" : "Complete the steps first", done: false },
   ];
   const currentStepIndex = Math.max(0, setupSteps.findIndex((step) => !step.done));
@@ -1059,17 +1060,17 @@ export default function App() {
               <>
                 <label className="setup-field">
                   <div className="setup-stack">
-                    <span className="setup-label">Shift</span>
+                    <span className="setup-label">Plan Shift</span>
                     <select
                       className="select-field"
                       value={selectedTimeShift || "ALL"}
                       onChange={(event) => { setSelectedTimeShift(event.target.value); setStatusMessage(""); }}
                       disabled={isOptimising}
-                      aria-label="Select shift to plan"
+                      aria-label="Select shifts to plan"
                     >
-                      <option value="ALL">All shifts</option>
+                      <option value="ALL">All shifts (A, B, C)</option>
                       {Object.keys(shiftStartTimes).sort().map((shift) => (
-                        <option key={shift} value={shift}>Shift {shift}</option>
+                        <option key={shift} value={shift}>Shift {shift} only</option>
                       ))}
                     </select>
                   </div>
@@ -1077,7 +1078,7 @@ export default function App() {
                 {selectedTimeShift && selectedTimeShift !== "ALL" ? (
                   <label className="setup-field">
                     <div className="setup-stack">
-                      <span className="setup-label">Shift starts at</span>
+                      <span className="setup-label">Shift {selectedTimeShift} starts at</span>
                       <input
                         type="time"
                         required
@@ -1094,13 +1095,30 @@ export default function App() {
                     {needsShiftTimeRerun && clustering && <span className="pill pill-warn">Re-run to apply</span>}
                   </label>
                 ) : (
-                  <div className="setup-field" style={{ minWidth: "160px" }}>
+                  <div className="setup-field" style={{ minWidth: "260px" }}>
                     <div className="setup-stack">
                       <span className="setup-label">Shift start times</span>
-                      <strong style={{ fontSize: "13px", color: "var(--text)" }}>
-                        {Object.entries(shiftStartTimes).sort(([a], [b]) => a.localeCompare(b)).map(([s, t]) => `${s}: ${t}`).join(" · ") || "Standard"}
-                      </strong>
+                      <div style={{ display: "flex", gap: "8px", alignItems: "center", flexWrap: "wrap", marginTop: "2px" }}>
+                        {Object.keys(shiftStartTimes).sort().map((s) => (
+                          <label key={s} style={{ display: "inline-flex", alignItems: "center", gap: "4px", fontSize: "12px", color: "var(--text-muted)", cursor: "pointer" }}>
+                            <span style={{ fontWeight: 700, color: "var(--text)" }}>{s}:</span>
+                            <input
+                              type="time"
+                              className="input-field"
+                              style={{ padding: "3px 6px", fontSize: "12px", width: "92px", height: "30px" }}
+                              value={shiftStartTimes[s] || ""}
+                              onChange={(e) => {
+                                setShiftStartTimes((curr) => ({ ...curr, [s]: e.target.value }));
+                                setStatusMessage("");
+                              }}
+                              disabled={isOptimising}
+                              aria-label={`Start time for Shift ${s}`}
+                            />
+                          </label>
+                        ))}
+                      </div>
                     </div>
+                    {needsShiftTimeRerun && clustering && <span className="pill pill-warn">Re-run to apply</span>}
                   </div>
                 )}
               </>
