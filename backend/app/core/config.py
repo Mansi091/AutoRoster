@@ -40,14 +40,28 @@ class FleetConfig(BaseModel):
 
 
 class CommuteConfig(BaseModel):
-    target_commute_minutes: float = float(os.getenv("TARGET_RIDE_TIME_MINUTES", "60"))
-    hard_max_commute_minutes: float = float(os.getenv("MAX_RIDE_TIME_MINUTES", "70"))
     arrival_buffer_minutes: int = int(os.getenv("ARRIVAL_BUFFER_MINUTES", "10"))
+    pickup_window_hard_minutes: float = float(os.getenv("PICKUP_WINDOW_HARD", "70"))
+    pickup_window_soft_minutes: float = float(os.getenv("PICKUP_WINDOW_SOFT", "60"))
+    target_commute_minutes: float = float(
+        os.getenv(
+            "TARGET_RIDE_TIME_MINUTES",
+            str(float(os.getenv("PICKUP_WINDOW_SOFT", "60")) - float(os.getenv("ARRIVAL_BUFFER_MINUTES", "10"))),
+        )
+    )
+    hard_max_commute_minutes: float = float(
+        os.getenv(
+            "MAX_RIDE_TIME_MINUTES",
+            str(float(os.getenv("PICKUP_WINDOW_HARD", "70")) - float(os.getenv("ARRIVAL_BUFFER_MINUTES", "10"))),
+        )
+    )
+    stop_dwell_seconds: float = float(os.getenv("STOP_DWELL_SECONDS", "90"))
     dwell_minutes_per_stop: float = float(os.getenv("STOP_DWELL_MINUTES", "1.5"))
-    dwell_seconds_per_passenger: float = float(os.getenv("BOARDING_SECONDS_PER_PASSENGER", "0"))
+    dwell_seconds_per_passenger: float = float(os.getenv("BOARDING_SECONDS_PER_PASSENGER", "10"))
     pune_road_curvature_factor: float = 1.35
     transit_speed_kmh: float = float(os.getenv("TRANSIT_SPEED_KMH", "38.0"))
     highway_express_speed_kmh: float = 45.0
+    km_weight: float = float(os.getenv("KM_WEIGHT", "0.05"))
 
 
 class GeofenceConfig(BaseModel):
@@ -122,8 +136,9 @@ class AppConfig:
     OSRM_TABLE_URL: str = os.getenv("OSRM_TABLE_URL", "https://router.project-osrm.org/table/v1/driving")
     OSRM_ROUTE_URL: str = os.getenv("OSRM_ROUTE_URL", "https://router.project-osrm.org/route/v1/driving")
     ROUTE_SOLVER_TIME_LIMIT_SECONDS: int = max(
-        1, min(300, int(os.getenv("ROUTE_SOLVER_TIME_LIMIT_SECONDS", "30")))
+        1, min(300, int(os.getenv("ROUTE_SOLVER_TIME_LIMIT_SECONDS", "20")))
     )
+    KM_WEIGHT: float = float(os.getenv("KM_WEIGHT", "0.05"))
     PICKUP_MERGE_RADIUS_METERS: float = float(os.getenv("PICKUP_MERGE_RADIUS_METERS", "400"))
 
     # File Paths
