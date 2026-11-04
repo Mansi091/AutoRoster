@@ -27,6 +27,7 @@ import {
   ShieldCheck,
   Route as RouteIcon,
   Gauge,
+  SlidersHorizontal,
 } from "lucide-react";
 import { exportToExcel } from "./utils/excel";
 import { computeFleetCost } from "./utils/fleetCost";
@@ -142,6 +143,10 @@ function adaptMultiShiftResponse(shifts, destination) {
         plant_arrival_time: r.plant_arrival_time,
         road_geometry: r.road_geometry || null,
         ride_time_status: r.ride_time_status || null,
+        hard_limit_delta_sec: r.hard_limit_delta_sec,
+        is_near_hard_limit: r.is_near_hard_limit,
+        hard_limit_proximity_sec: r.hard_limit_proximity_sec,
+        hard_limit_status: r.hard_limit_status,
         stops: adaptedStops,
       });
     });
@@ -211,6 +216,10 @@ export default function App() {
 
   // Optimization & Routing State
   const [clustering, setClustering] = useState(null);
+  const [scenariosData, setScenariosData] = useState(null);
+  const [selectedScenarioName, setSelectedScenarioName] = useState("current config");
+  const [showScenariosModal, setShowScenariosModal] = useState(false);
+  const [originalShifts, setOriginalShifts] = useState(null);
   const [uploadedRosterFile, setUploadedRosterFile] = useState(null);
   const [isOptimising, setIsOptimising] = useState(false);
   const isPlanning = isOptimising && Boolean(uploadedRosterFile);
@@ -1061,6 +1070,16 @@ export default function App() {
               <button type="button" className="btn btn-secondary" onClick={startNewRoster}>
                 <Upload size={15} /> New roster
               </button>
+              {scenariosData?.comparison_table && (
+                <button
+                  type="button"
+                  className={`btn ${selectedScenarioName !== "current config" ? "btn-primary" : "btn-secondary"}`}
+                  onClick={() => setShowScenariosModal(true)}
+                  title="Compare dwell and commute scenarios"
+                >
+                  <SlidersHorizontal size={15} /> Compare scenarios
+                </button>
+              )}
               <button type="button" className="btn btn-secondary" onClick={() => runOptimization()} disabled={isOptimising}>
                 <RefreshCw size={15} className={isOptimising ? "spin" : ""} />
                 {isOptimising ? "Optimizing…" : "Re-run"}
@@ -1071,6 +1090,27 @@ export default function App() {
             </div>
           )}
         </div>
+
+        {selectedScenarioName !== "current config" && clustering && (
+          <div className="banner" style={{ background: "#FDF2E9", borderColor: "#F39C12", color: "#784212", display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 16px", borderRadius: "8px" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+              <SlidersHorizontal size={16} />
+              <span>Viewing Scenario: <strong>{selectedScenarioName}</strong></span>
+            </div>
+            <button
+              type="button"
+              className="btn btn-sm btn-soft"
+              onClick={() => {
+                if (originalShifts) {
+                  setClustering(adaptMultiShiftResponse(originalShifts, destination));
+                  setSelectedScenarioName("current config");
+                }
+              }}
+            >
+              Revert to current config
+            </button>
+          </div>
+        )}
 
         {activeTab !== "history" && (
           <section className="setup-bar" aria-label="Planning setup">
@@ -1193,6 +1233,104 @@ export default function App() {
 
 
           </section>
+        )}
+
+        
+        {/* Scenario Comparison Modal */}
+        {showScenariosModal && scenariosData && (
+          <div className="modal-overlay" onClick={() => setShowScenariosModal(false)}>
+            <div className="modal-container" style={{ maxWidth: "860px", width: "95%" }} onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-label="Compare Scenarios">
+              <div className="modal-header">
+                <h3 className="modal-title" style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                  <SlidersHorizontal size={18} /> Compare Scenarios (Operational Sensitivity)
+                </h3>
+                <button type="button" className="icon-btn" onClick={() => setShowScenariosModal(false)} aria-label="Close modal">
+                  <X size={18} />
+                </button>
+              </div>
+
+              <div style={{ padding: "0 20px 20px" }}>
+                <p style={{ fontSize: "13px", color: "var(--secondary-grey)", margin: "0 0 16px" }}>
+                  Evaluate fleet size, distance, and commute time trade-offs across different operating assumptions. The default active plan remains <strong>current config</strong>.
+                </p>
+
+                <div style={{ overflowX: "auto", border: "1px solid var(--border-grey)", borderRadius: "8px" }}>
+                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "13px" }}>
+                    <thead>
+                      <tr style={{ background: "var(--light-bg)", borderBottom: "1px solid var(--border-grey)", textAlign: "left" }}>
+                        <th style={{ padding: "10px 12px" }}>Scenario</th>
+                        <th style={{ padding: "10px 12px", textAlign: "center" }}>Buses</th>
+                        <th style={{ padding: "10px 12px", textAlign: "center" }}>Buses Saved</th>
+                        <th style={{ padding: "10px 12px", textAlign: "right" }}>Total km</th>
+                        <th style={{ padding: "10px 12px", textAlign: "right" }}>Avg Pax</th>
+                        <th style={{ padding: "10px 12px", textAlign: "right" }}>Max Ride</th>
+                        <th style={{ padding: "10px 12px", textAlign: "right" }}>Max Window</th>
+                        <th style={{ padding: "10px 12px", textAlign: "center" }}>Near-Limit</th>
+                        <th style={{ padding: "10px 12px", textAlign: "center" }}>Action</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {(scenariosData.comparison_table || []).map((row) => {
+                        const isSelected = selectedScenarioName === row.scenario_name;
+                        return (
+                          <tr key={row.scenario_name} style={{ borderBottom: "1px solid var(--border-grey)", background: isSelected ? "#FDF2E9" : "transparent" }}>
+                            <td style={{ padding: "10px 12px" }}>
+                              <strong>{row.scenario_name}</strong>
+                              {row.description && (
+                                <div style={{ fontSize: "11px", color: "var(--secondary-grey)", marginTop: "2px" }}>
+                                  {row.description}
+                                </div>
+                              )}
+                            </td>
+                            <td style={{ padding: "10px 12px", textAlign: "center", fontWeight: "600" }}>
+                              {row.buses}
+                            </td>
+                            <td style={{ padding: "10px 12px", textAlign: "center" }}>
+                              {row.buses_saved_vs_current > 0 ? (
+                                <span className="pill pill-ok">+{row.buses_saved_vs_current} Saved</span>
+                              ) : row.buses_saved_vs_current < 0 ? (
+                                <span className="pill pill-warn">{row.buses_saved_vs_current}</span>
+                              ) : (
+                                <span style={{ color: "var(--secondary-grey)" }}>—</span>
+                              )}
+                            </td>
+                            <td style={{ padding: "10px 12px", textAlign: "right" }}>{row.total_km} km</td>
+                            <td style={{ padding: "10px 12px", textAlign: "right" }}>{row.avg_pax_per_bus}</td>
+                            <td style={{ padding: "10px 12px", textAlign: "right" }}>{row.max_ride_min}m</td>
+                            <td style={{ padding: "10px 12px", textAlign: "right" }}>{row.max_first_pickup_before_shift_min}m</td>
+                            <td style={{ padding: "10px 12px", textAlign: "center" }}>
+                              {row.near_limit_buses > 0 ? (
+                                <span className="pill pill-warn">{row.near_limit_buses} near limit</span>
+                              ) : (
+                                "0"
+                              )}
+                            </td>
+                            <td style={{ padding: "10px 12px", textAlign: "center" }}>
+                              <button
+                                type="button"
+                                className={`btn btn-xs ${isSelected ? "btn-primary" : "btn-secondary"}`}
+                                onClick={() => {
+                                  setSelectedScenarioName(row.scenario_name);
+                                  if (row.scenario_name === "current config" && originalShifts) {
+                                    setClustering(adaptMultiShiftResponse(originalShifts, destination));
+                                  } else if (scenariosData.scenario_plans?.[row.scenario_name]?.shifts) {
+                                    setClustering(adaptMultiShiftResponse(scenariosData.scenario_plans[row.scenario_name].shifts, destination));
+                                  }
+                                  setShowScenariosModal(false);
+                                }}
+                              >
+                                {isSelected ? "Active on Map" : "View on Map"}
+                              </button>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          </div>
         )}
 
         {/* Drop-off picker */}
@@ -1665,6 +1803,11 @@ export default function App() {
                           <span className={`pill ${Number.isFinite(rideMinutes) ? (isOverLimit ? "pill-warn" : "pill-ok") : ""}`}>
                             {Number.isFinite(rideMinutes) ? (isOverLimit ? "Needs review" : "Within limit") : "Time unavailable"}
                           </span>
+                          {route.is_near_hard_limit && (
+                            <span className="pill pill-warn" title={`Within safety threshold: ${route.hard_limit_status}`}>
+                              ⚠️ {route.hard_limit_status}
+                            </span>
+                          )}
                         </div>
                         <p className="route-corridor">{route.corridor}</p>
                       </div>

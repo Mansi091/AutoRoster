@@ -27,7 +27,8 @@ import requests
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from ortools.constraint_solver import pywrapcp, routing_enums_pb2
-from backend.app.core.config import config
+from backend.app.core.config import config, load_scenarios
+ROUTE_NEAR_LIMIT_SEC = float(getattr(config, "ROUTE_NEAR_LIMIT_SEC", 120.0))
 from backend.app.etl.transform.candidate_scoring import evaluate_coordinate_candidate
 
 BUS_CAPACITY = config.FLEET.standard_bus_capacity
@@ -88,8 +89,15 @@ SHIFT_CONFIG = {
 }
 
 
-def _stop_dwell_seconds(node: Any, nodes: Optional[List[Dict[str, Any]]] = None) -> float:
+def _stop_dwell_seconds(
+    node: Any,
+    nodes: Optional[List[Dict[str, Any]]] = None,
+    stop_dwell_sec: Optional[float] = None,
+    boarding_sec_pax: Optional[float] = None,
+) -> float:
     """True dwell in seconds: STOP_DWELL_SECONDS (90) + BOARDING_SECONDS_PER_PASSENGER * demand."""
+    base_dwell = STOP_DWELL_SECONDS if stop_dwell_sec is None else float(stop_dwell_sec)
+    boarding_rate = BOARDING_SECONDS_PER_PASSENGER if boarding_sec_pax is None else float(boarding_sec_pax)
     if isinstance(node, int) and nodes is not None:
         demand = int(nodes[node].get("demand", 0))
     elif isinstance(node, dict):
@@ -99,12 +107,17 @@ def _stop_dwell_seconds(node: Any, nodes: Optional[List[Dict[str, Any]]] = None)
             demand = int(node or 0)
         except (ValueError, TypeError):
             demand = 0
-    return STOP_DWELL_SECONDS + (BOARDING_SECONDS_PER_PASSENGER * demand)
+    return base_dwell + (boarding_rate * demand)
 
 
-def _stop_dwell_minutes(node: Any, nodes: Optional[List[Dict[str, Any]]] = None) -> float:
+def _stop_dwell_minutes(
+    node: Any,
+    nodes: Optional[List[Dict[str, Any]]] = None,
+    stop_dwell_sec: Optional[float] = None,
+    boarding_sec_pax: Optional[float] = None,
+) -> float:
     """Legacy minute accessor converting _stop_dwell_seconds to fractional minutes."""
-    return _stop_dwell_seconds(node, nodes) / 60.0
+    return _stop_dwell_seconds(node, nodes, stop_dwell_sec, boarding_sec_pax) / 60.0
 
 
 def _stop_key(name: str) -> str:
@@ -146,8 +159,12 @@ def haversine_distance_m(c1: Tuple[float, float], c2: Tuple[float, float]) -> fl
     return R * 2.0 * math.atan2(math.sqrt(a), math.sqrt(1.0 - a))
 
 
-def merge_nearby_pickups(stop_groups: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
+def merge_nearby_pickups(
+    stop_groups: Dict[str, Dict[str, Any]],
+    merge_radius_meters: Optional[float] = None,
+) -> List[Dict[str, Any]]:
     """Deterministically merge only compact pickup groups that fit one bus."""
+    radius_m = MERGE_RADIUS_METERS if merge_radius_meters is None else float(merge_radius_meters)
     clusters = [
         {"members": [stop], "demand": len(stop["employees"]), "employees": list(stop["employees"])}
         for stop in sorted(stop_groups.values(), key=lambda item: (item["lat"], item["lon"], item["name"]))
@@ -164,7 +181,7 @@ def merge_nearby_pickups(stop_groups: Dict[str, Dict[str, Any]]) -> List[Dict[st
                     haversine_distance_m((a["lat"], a["lon"]), (b["lat"], b["lon"]))
                     for a in left["members"] for b in right["members"]
                 ]
-                if not cross_distances or max(cross_distances) > MERGE_RADIUS_METERS:
+                if not cross_distances or max(cross_distances) > radius_m:
                     continue
                 score = (max(cross_distances), sum(cross_distances), i, j)
                 if best_pair is None or score < best_pair[0]:
@@ -446,6 +463,8 @@ def route_duration_sec(
     plant_node: int,
     facility: Optional[Dict[str, Any]] = None,
     source: Optional[str] = None,
+    stop_dwell_sec: Optional[float] = None,
+    boarding_sec_pax: Optional[float] = None,
 ) -> Tuple[float, float, float]:
     """Single authority for route duration in seconds: (total_sec, drive_sec, dwell_sec).
     Data source = FEASIBILITY_SOURCE ('table' | 'route').
@@ -454,7 +473,7 @@ def route_duration_sec(
     if not sequence:
         return 0.0, 0.0, 0.0
     src = (source or FEASIBILITY_SOURCE).strip().lower()
-    dwell_sec = float(sum(_stop_dwell_seconds(idx, nodes) for idx in sequence))
+    dwell_sec = float(sum(_stop_dwell_seconds(idx, nodes, stop_dwell_sec=stop_dwell_sec, boarding_sec_pax=boarding_sec_pax) for idx in sequence))
     if src == "route" and facility:
         waypoints = [(nodes[idx]["lat"], nodes[idx]["lon"]) for idx in sequence]
         waypoints.append((facility["lat"], facility["lon"]))
@@ -478,6 +497,8 @@ def compute_plan_signature(
     nodes: List[Dict[str, Any]],
     facility: Dict[str, Any],
     num_pickups: int,
+    hard_ride_sec: Optional[int] = None,
+    target_ride_sec: Optional[int] = None,
 ) -> str:
     """Computes a deterministic hash of (roster employees+stops, facility, shift, ride limits, capacity)."""
     canonical_pickups = []
@@ -504,8 +525,8 @@ def compute_plan_signature(
             "lon": round(float(facility.get("lon", 0.0)), 6),
         },
         "ride_limits": {
-            "hard_sec": int(MAX_RIDE_TIME_SEC),
-            "target_sec": int(TARGET_RIDE_TIME_SEC),
+            "hard_sec": int(MAX_RIDE_TIME_SEC if hard_ride_sec is None else hard_ride_sec),
+            "target_sec": int(TARGET_RIDE_TIME_SEC if target_ride_sec is None else target_ride_sec),
         },
         "capacity": int(BUS_CAPACITY),
         "pickups": canonical_pickups,
@@ -645,25 +666,30 @@ def repair_route_sequences(
     plant_node: int,
     facility: Dict[str, Any],
     source: Optional[str] = None,
+    max_ride_sec: Optional[int] = None,
+    stop_dwell_sec: Optional[float] = None,
+    boarding_sec_pax: Optional[float] = None,
 ) -> Tuple[List[Tuple[List[int], Dict[str, Any]]], List[int]]:
     """Validate routes using route_duration_sec and split any route over MAX_RIDE_TIME_SEC.
     With 'table': Route API is used ONLY for map geometry, never to split routes.
     """
     src = (source or FEASIBILITY_SOURCE).strip().lower()
+    limit_sec = MAX_RIDE_TIME_SEC if max_ride_sec is None else int(max_ride_sec)
     route_cache: Dict[Tuple[int, ...], float] = {}
 
     def get_ride_sec(sequence: List[int]) -> float:
         key = tuple(sequence)
         if key not in route_cache:
             total_sec, _, _ = route_duration_sec(
-                sequence, nodes, time_matrix, plant_node, facility, source=src
+                sequence, nodes, time_matrix, plant_node, facility, source=src,
+                stop_dwell_sec=stop_dwell_sec, boarding_sec_pax=boarding_sec_pax,
             )
             route_cache[key] = total_sec
         return route_cache[key]
 
     def split(sequence: List[int]) -> Tuple[List[List[int]], List[int]]:
         ride_sec = get_ride_sec(sequence)
-        if ride_sec <= MAX_RIDE_TIME_SEC:
+        if ride_sec <= limit_sec:
             return [sequence], []
         if len(sequence) == 1:
             return [], sequence
@@ -681,7 +707,7 @@ def repair_route_sequences(
                 right,
             ))
 
-        feasible_splits = [candidate for candidate in candidates if candidate[0] <= MAX_RIDE_TIME_SEC]
+        feasible_splits = [candidate for candidate in candidates if candidate[0] <= limit_sec]
         if feasible_splits:
             best = min(feasible_splits, key=lambda candidate: candidate[:3])
             return [best[3], best[4]], []
@@ -717,19 +743,28 @@ def improve_validated_route_sequences(
     dist_matrix: Optional[List[List[float]]] = None,
     facility: Optional[Dict[str, Any]] = None,
     source: Optional[str] = None,
+    max_ride_sec: Optional[int] = None,
+    target_ride_sec: Optional[int] = None,
+    stop_dwell_sec: Optional[float] = None,
+    boarding_sec_pax: Optional[float] = None,
 ) -> List[List[List[int]]]:
     """Return ranked local-search candidates scored by (buses, target_excess_seconds, total_km)."""
     base = [list(route) for route in route_sequences if route]
     if not base:
         return []
 
+    limit_sec = MAX_RIDE_TIME_SEC if max_ride_sec is None else int(max_ride_sec)
+    tgt_sec = TARGET_RIDE_TIME_SEC if target_ride_sec is None else int(target_ride_sec)
     memo_duration: Dict[Tuple[int, ...], int] = {}
 
     def duration(sequence: Tuple[int, ...]) -> int:
         if not sequence:
             return 0
         if sequence not in memo_duration:
-            tot, _, _ = route_duration_sec(list(sequence), nodes, time_matrix, plant_node, facility, source)
+            tot, _, _ = route_duration_sec(
+                list(sequence), nodes, time_matrix, plant_node, facility, source,
+                stop_dwell_sec=stop_dwell_sec, boarding_sec_pax=boarding_sec_pax
+            )
             memo_duration[sequence] = int(round(tot))
         return memo_duration[sequence]
 
@@ -749,12 +784,12 @@ def improve_validated_route_sequences(
 
     def score(routes: List[List[int]]) -> Tuple[int, int, float]:
         durations = [duration(tuple(route)) for route in routes]
-        target_excess_sec = sum(max(0, d - TARGET_RIDE_TIME_SEC) for d in durations)
+        target_excess_sec = sum(max(0, d - tgt_sec) for d in durations)
         return len(routes), int(target_excess_sec), calc_total_km(routes)
 
     def feasible(sequence: List[int]) -> bool:
         key = tuple(sequence)
-        return demand(key) <= BUS_CAPACITY and duration(key) <= MAX_RIDE_TIME_SEC
+        return demand(key) <= BUS_CAPACITY and duration(key) <= limit_sec
 
 
     # Multiple deterministic starting orders help escape a poor initial stop
@@ -895,8 +930,23 @@ def solve_shift_routes(
     resolution_details: Optional[Dict[str, Dict[str, Any]]] = None,
     shift_deadlines: Optional[Dict[str, int]] = None,
     plan_history_mode: Optional[str] = None,
+    scenario_overrides: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Solves the multi-bus CVRPTW for a single shift using Google OR-Tools."""
+    overrides = scenario_overrides or {}
+    local_stop_dwell_sec = float(overrides.get("STOP_DWELL_SECONDS", STOP_DWELL_SECONDS))
+    local_boarding_sec_pax = float(overrides.get("BOARDING_SECONDS_PER_PASSENGER", BOARDING_SECONDS_PER_PASSENGER))
+    local_arrival_buffer_min = float(overrides.get("ARRIVAL_BUFFER_MINUTES", ARRIVAL_BUFFER_MIN))
+    local_pickup_window_hard = float(overrides.get("PICKUP_WINDOW_HARD", PICKUP_WINDOW_HARD))
+    local_pickup_window_soft = float(overrides.get("PICKUP_WINDOW_SOFT", PICKUP_WINDOW_SOFT))
+    local_merge_radius_m = float(overrides.get("PICKUP_MERGE_RADIUS_METERS", MERGE_RADIUS_METERS))
+    local_near_limit_sec = float(overrides.get("ROUTE_NEAR_LIMIT_SEC", ROUTE_NEAR_LIMIT_SEC))
+
+    local_max_ride_min = local_pickup_window_hard - local_arrival_buffer_min
+    local_target_ride_min = local_pickup_window_soft - local_arrival_buffer_min
+    local_max_ride_sec = int(round(local_max_ride_min * 60))
+    local_target_ride_sec = int(round(local_target_ride_min * 60))
+
     cfg = dict(SHIFT_CONFIG[shift])
     if shift_deadlines and shift in shift_deadlines:
         cfg["deadline_min"] = int(shift_deadlines[shift])
@@ -943,7 +993,7 @@ def solve_shift_routes(
         stop_groups[coord_key]["employees"].append(emp)
 
     # 2. Merge compact, capacity-safe pickup clusters independent of roster row order.
-    merged_stops = merge_nearby_pickups(stop_groups)
+    merged_stops = merge_nearby_pickups(stop_groups, merge_radius_meters=local_merge_radius_m)
 
     num_pickups = len(merged_stops)
     total_demand = sum(s["demand"] for s in merged_stops)
@@ -1009,7 +1059,7 @@ def solve_shift_routes(
         v = manager.IndexToNode(to_index)
         if u == start_node:
             return 0
-        dwell = int(round(_stop_dwell_seconds(u, nodes))) if u < num_pickups else 0
+        dwell = int(round(_stop_dwell_seconds(u, nodes, stop_dwell_sec=local_stop_dwell_sec, boarding_sec_pax=local_boarding_sec_pax))) if u < num_pickups else 0
         return time_matrix[u][v] + dwell
 
     # Arc cost callback: travel seconds + dwell + KM_WEIGHT * metres (breaks ties, fuel savings)
@@ -1018,7 +1068,7 @@ def solve_shift_routes(
         v = manager.IndexToNode(to_index)
         if u == start_node:
             return 0
-        dwell = int(round(_stop_dwell_seconds(u, nodes))) if u < num_pickups else 0
+        dwell = int(round(_stop_dwell_seconds(u, nodes, stop_dwell_sec=local_stop_dwell_sec, boarding_sec_pax=local_boarding_sec_pax))) if u < num_pickups else 0
         travel_sec = time_matrix[u][v]
         meters = dist_matrix[u][v]
         return int(round(travel_sec + dwell + KM_WEIGHT * meters))
@@ -1031,10 +1081,10 @@ def solve_shift_routes(
     soft_penalty_per_second = 5  # Scaled from 300 / 60s
     max_leg_sec = max((max(row) for row in time_matrix), default=0)
     max_leg_meters = max((max(row) for row in dist_matrix), default=0.0)
-    max_dwell_sec = sum(_stop_dwell_seconds(idx, nodes) for idx in range(num_pickups))
+    max_dwell_sec = sum(_stop_dwell_seconds(idx, nodes, stop_dwell_sec=local_stop_dwell_sec, boarding_sec_pax=local_boarding_sec_pax) for idx in range(num_pickups))
     max_arc_cost = max_leg_sec + int(round(KM_WEIGHT * max_leg_meters))
     max_total_travel_cost = num_vehicles * ((num_pickups + 1) * max_arc_cost + int(round(max_dwell_sec)))
-    max_target_penalty = num_vehicles * max(0, MAX_RIDE_TIME_SEC - TARGET_RIDE_TIME_SEC) * soft_penalty_per_second
+    max_target_penalty = num_vehicles * max(0, local_max_ride_sec - local_target_ride_sec) * soft_penalty_per_second
     max_total_cost = max_total_travel_cost + max_target_penalty
 
     # Fixed vehicle cost dominates: removing 1 bus is always preferred
@@ -1053,19 +1103,19 @@ def solve_shift_routes(
         "Capacity"
     )
 
-    # Time Dimension (Hard limit: MAX_RIDE_TIME_SEC; Soft target: TARGET_RIDE_TIME_SEC)
+    # Time Dimension (Hard limit: local_max_ride_sec; Soft target: local_target_ride_sec)
     routing.AddDimension(
         time_callback_index,
         0,
-        int(MAX_RIDE_TIME_SEC),
+        int(local_max_ride_sec),
         True,
         "Time"
     )
     time_dimension = routing.GetDimensionOrDie("Time")
     for v in range(num_vehicles):
         end_idx = routing.End(v)
-        time_dimension.CumulVar(end_idx).SetRange(0, int(MAX_RIDE_TIME_SEC))
-        time_dimension.SetCumulVarSoftUpperBound(end_idx, int(TARGET_RIDE_TIME_SEC), soft_penalty_per_second)
+        time_dimension.CumulVar(end_idx).SetRange(0, int(local_max_ride_sec))
+        time_dimension.SetCumulVarSoftUpperBound(end_idx, int(local_target_ride_sec), soft_penalty_per_second)
 
     for node_idx in range(num_pickups):
         routing.AddDisjunction(
@@ -1078,18 +1128,21 @@ def solve_shift_routes(
         served = sum(int(nodes[idx]["demand"]) for idx in covered)
         durations_sec, distance_m = [], 0.0
         for sequence, road_info in candidate_routes:
-            tot_sec, _, _ = route_duration_sec(sequence, nodes, time_matrix, plant_node, facility)
+            tot_sec, _, _ = route_duration_sec(
+                sequence, nodes, time_matrix, plant_node, facility,
+                stop_dwell_sec=local_stop_dwell_sec, boarding_sec_pax=local_boarding_sec_pax
+            )
             durations_sec.append(tot_sec)
             dist_km = float(road_info.get("distance_km") or sum(road_info.get("leg_distances_km", [])))
             distance_m += dist_km * 1000.0
-        target_excess_sec = sum(max(0.0, ride - TARGET_RIDE_TIME_SEC) for ride in durations_sec)
+        target_excess_sec = sum(max(0.0, ride - local_target_ride_sec) for ride in durations_sec)
         total_km = round(distance_m / 1000.0, 2)
         return (-served, len(candidate_routes), int(round(target_excess_sec)), total_km)
 
     # Phase 3 & Section B: Evaluate strategies, warm-start from previous best, and pool candidates
     # Phase 3 & Section B: Evaluate strategies, warm-start from previous best, and pool candidates
     history_mode = (plan_history_mode or PLAN_HISTORY_MODE).strip().lower()
-    plan_signature = compute_plan_signature(shift, nodes, facility, num_pickups)
+    plan_signature = compute_plan_signature(shift, nodes, facility, num_pickups, hard_ride_sec=local_max_ride_sec, target_ride_sec=local_target_ride_sec)
     
     stored_result = None
     prev_score = None
@@ -1143,7 +1196,10 @@ def solve_shift_routes(
         prev_v_routes, prev_imp = [], set()
         for r_stops in prev_routes:
             repaired, impossible = repair_route_sequences(
-                r_stops, nodes, time_matrix, plant_node, facility
+                r_stops, nodes, time_matrix, plant_node, facility,
+                max_ride_sec=local_max_ride_sec,
+                stop_dwell_sec=local_stop_dwell_sec,
+                boarding_sec_pax=local_boarding_sec_pax,
             )
             prev_v_routes.extend(repaired)
             prev_imp.update(impossible)
@@ -1178,7 +1234,10 @@ def solve_shift_routes(
         imp_nodes = set()
         for r_stops in strat_routes:
             repaired, impossible = repair_route_sequences(
-                r_stops, nodes, time_matrix, plant_node, facility
+                r_stops, nodes, time_matrix, plant_node, facility,
+                max_ride_sec=local_max_ride_sec,
+                stop_dwell_sec=local_stop_dwell_sec,
+                boarding_sec_pax=local_boarding_sec_pax,
             )
             v_routes.extend(repaired)
             imp_nodes.update(impossible)
@@ -1187,7 +1246,11 @@ def solve_shift_routes(
         for _ in range(2):
             curr_seqs = [seq for seq, _ in v_routes]
             cand_plans = improve_validated_route_sequences(
-                curr_seqs, nodes, time_matrix, plant_node, dist_matrix, facility=facility
+                curr_seqs, nodes, time_matrix, plant_node, dist_matrix, facility=facility,
+                max_ride_sec=local_max_ride_sec,
+                target_ride_sec=local_target_ride_sec,
+                stop_dwell_sec=local_stop_dwell_sec,
+                boarding_sec_pax=local_boarding_sec_pax,
             )
             b_routes, b_impossible = v_routes, imp_nodes
             b_score = actual_plan_score(b_routes)
@@ -1195,7 +1258,10 @@ def solve_shift_routes(
                 chk_routes, chk_impossible = [], set()
                 for r_stops in plan:
                     repaired, impossible = repair_route_sequences(
-                        r_stops, nodes, time_matrix, plant_node, facility
+                        r_stops, nodes, time_matrix, plant_node, facility,
+                        max_ride_sec=local_max_ride_sec,
+                        stop_dwell_sec=local_stop_dwell_sec,
+                        boarding_sec_pax=local_boarding_sec_pax,
                     )
                     chk_routes.extend(repaired)
                     chk_impossible.update(impossible)
@@ -1237,7 +1303,7 @@ def solve_shift_routes(
                 leg_durations_sec = [m * 60.0 for m in road_info.get("leg_durations_min", [])]
             leg_distances = road_info["leg_distances_km"]
 
-            route_dwells_sec = [_stop_dwell_seconds(node_idx, nodes) for node_idx in route_stops]
+            route_dwells_sec = [_stop_dwell_seconds(node_idx, nodes, stop_dwell_sec=local_stop_dwell_sec, boarding_sec_pax=local_boarding_sec_pax) for node_idx in route_stops]
             total_dwell_sec = sum(route_dwells_sec)
 
             # Leg-by-leg diagnostic: table_sec vs route_api_sec
@@ -1268,16 +1334,17 @@ def solve_shift_routes(
 
             # Authority duration according to FEASIBILITY_SOURCE
             route_duration_sec_val, drive_time_sec, _ = route_duration_sec(
-                route_stops, nodes, time_matrix, plant_node, facility
+                route_stops, nodes, time_matrix, plant_node, facility,
+                stop_dwell_sec=local_stop_dwell_sec, boarding_sec_pax=local_boarding_sec_pax,
             )
             route_duration_min = round(route_duration_sec_val / 60.0, 1)
             drive_time_min = round(drive_time_sec / 60.0, 1)
 
             duration_gap_sec = abs(solver_duration_sec - route_api_duration_sec)
 
-            if route_duration_sec_val > MAX_RIDE_TIME_SEC + 10:
+            if route_duration_sec_val > local_max_ride_sec + 10:
                 raise RuntimeError(
-                    f"A mapped route exceeded the {MAX_RIDE_TIME_MIN:g}-minute limit ({MAX_RIDE_TIME_SEC}s) after repair: {route_duration_sec_val:.1f}s; no plan was published."
+                    f"A mapped route exceeded the {local_max_ride_min:g}-minute limit ({local_max_ride_sec}s) after repair: {route_duration_sec_val:.1f}s; no plan was published."
                 )
 
             # Schedule stops using the single authority source
@@ -1307,14 +1374,28 @@ def solve_shift_routes(
                     "employees": nodes[node_idx]["employees"],
                 })
 
-            # Invariant check: first_pickup_time >= shift_start - PICKUP_WINDOW_HARD
-            shift_start_min = deadline_min + ARRIVAL_BUFFER_MIN
+            # Invariant check: first_pickup_time >= shift_start - local_pickup_window_hard
+            shift_start_min = deadline_min + local_arrival_buffer_min
             first_pickup_min = detailed_stops[0]["pickup_minute_of_day"]
             pickup_window_min = shift_start_min - first_pickup_min
-            assert pickup_window_min <= PICKUP_WINDOW_HARD + 0.5, (
+            assert pickup_window_min <= local_pickup_window_hard + 0.5, (
                 f"Bus {buses_used}: first pickup at minute {first_pickup_min} is {pickup_window_min:.1f}m before shift start ({shift_start_min}), "
-                f"exceeding hard window of {PICKUP_WINDOW_HARD:g}m!"
+                f"exceeding hard window of {local_pickup_window_hard:g}m!"
             )
+
+            # Near-limit calculation (how many seconds over/under hard limit)
+            hard_limit_delta_sec = local_max_ride_sec - route_duration_sec_val
+            is_near_hard_limit = abs(hard_limit_delta_sec) <= local_near_limit_sec
+            hard_limit_status = (
+                f"{abs(hard_limit_delta_sec):.0f}s under hard limit"
+                if hard_limit_delta_sec >= 0
+                else f"{abs(hard_limit_delta_sec):.0f}s over hard limit"
+            )
+            if is_near_hard_limit:
+                print(
+                    f"  [Near-Limit Watch] Bus {buses_used}: {route_duration_sec_val:.1f}s is within {local_near_limit_sec:.0f}s of hard limit {local_max_ride_sec}s "
+                    f"({abs(hard_limit_delta_sec):.1f}s {('under' if hard_limit_delta_sec >= 0 else 'over')})"
+                )
 
             route_dist_km = float(road_info["distance_km"] or sum(leg_distances))
             total_shift_km += route_dist_km
@@ -1343,8 +1424,12 @@ def solve_shift_routes(
                 "plant_arrival_time": cfg["display_deadline"],
                 "road_geometry": actual_geometry,
                 "ride_time_status": (
-                    "ON_TARGET" if route_duration_sec_val <= TARGET_RIDE_TIME_SEC else "WITHIN_ALLOWANCE"
+                    "ON_TARGET" if route_duration_sec_val <= local_target_ride_sec else "WITHIN_ALLOWANCE"
                 ),
+                "hard_limit_delta_sec": round(hard_limit_delta_sec, 1),
+                "is_near_hard_limit": is_near_hard_limit,
+                "hard_limit_proximity_sec": round(abs(hard_limit_delta_sec), 1),
+                "hard_limit_status": hard_limit_status,
                 "stops": detailed_stops,
             })
         assigned_node_ids = {node_idx for route, _ in validated_routes for node_idx in route}
@@ -1677,6 +1762,110 @@ def _primary_shift(shift_value: str) -> str:
     return "A"
 
 
+
+def evaluate_all_scenarios(
+    all_employees: List[Dict[str, Any]],
+    stop_lookup: Dict[str, Dict[str, Any]],
+    facility: Dict[str, Any],
+    resolution_details: Optional[Dict[str, Any]] = None,
+    shift_deadlines: Optional[Dict[str, int]] = None,
+    shift_filter: str = "ALL",
+    scenarios: Optional[List[Dict[str, Any]]] = None,
+    baseline_results: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    """Evaluates all scenarios from config cold across all shifts and computes comparison metrics."""
+    scenario_list = scenarios or load_scenarios()
+    comparison_table = []
+    scenario_plans: Dict[str, Any] = {}
+
+    shift_keys = ["A", "B", "C"] if shift_filter == "ALL" else [shift_filter]
+    base_buses = 0
+
+    print("\n" + "=" * 80)
+    print("EVALUATING ALL SCENARIOS (Cold solve, all strategies)")
+    print("=" * 80)
+
+    for idx, sc in enumerate(scenario_list):
+        sc_name = sc["name"]
+        overrides = sc.get("overrides", {})
+        print(f"\n>>> Running Scenario [{idx+1}/{len(scenario_list)}]: '{sc_name}'")
+
+        if idx == 0 and baseline_results is not None:
+            shift_results = baseline_results
+        else:
+            shift_results = []
+            for shift_key in shift_keys:
+                shift_emps = [e for e in all_employees if _primary_shift(e["shift"]) == shift_key]
+                res = solve_shift_routes(
+                    shift_key,
+                    shift_emps,
+                    stop_lookup,
+                    facility,
+                    resolution_details=resolution_details,
+                    shift_deadlines=shift_deadlines,
+                    plan_history_mode="ignore",
+                    scenario_overrides=overrides,
+                )
+                shift_results.append(res)
+
+        total_buses = sum(s.get("buses_used", len(s.get("routes", []))) for s in shift_results)
+        total_km = round(sum(s.get("total_distance_km", 0.0) for s in shift_results), 1)
+        total_pax = sum(s.get("assigned_passengers", 0) for s in shift_results)
+        avg_pax = round(total_pax / total_buses, 1) if total_buses else 0.0
+
+        all_routes = [r for s in shift_results for r in s.get("routes", [])]
+        max_ride_min = max((r.get("route_duration_min", 0.0) for r in all_routes), default=0.0)
+
+        # max first pickup before shift
+        max_pickup_before_shift_min = 0.0
+        for s in shift_results:
+            shift_name = s.get("shift", "A")
+            shift_cfg = SHIFT_CONFIG.get(shift_name, {})
+            dl = (shift_deadlines.get(shift_name) if shift_deadlines else None) or shift_cfg.get("deadline_min", 410)
+            arr_buf = overrides.get("ARRIVAL_BUFFER_MINUTES", ARRIVAL_BUFFER_MIN)
+            shift_start = dl + arr_buf
+            for r in s.get("routes", []):
+                stops = r.get("stops", [])
+                if stops:
+                    p_min = stops[0].get("pickup_minute_of_day")
+                    if p_min is not None:
+                        window = shift_start - p_min
+                        if window > max_pickup_before_shift_min:
+                            max_pickup_before_shift_min = window
+
+        near_limit_buses = sum(1 for r in all_routes if r.get("is_near_hard_limit"))
+
+        if idx == 0:
+            base_buses = total_buses
+            buses_saved = 0
+        else:
+            buses_saved = base_buses - total_buses
+
+        row = {
+            "scenario_name": sc_name,
+            "description": sc.get("description", ""),
+            "buses": total_buses,
+            "total_km": total_km,
+            "avg_pax_per_bus": avg_pax,
+            "max_ride_min": round(max_ride_min, 1),
+            "max_first_pickup_before_shift_min": round(max_pickup_before_shift_min, 1),
+            "buses_saved_vs_current": buses_saved,
+            "near_limit_buses": near_limit_buses,
+            "overrides": overrides,
+        }
+        comparison_table.append(row)
+        scenario_plans[sc_name] = {
+            "shifts": shift_results,
+            "total_buses": total_buses,
+            "total_km": total_km,
+        }
+
+    return {
+        "comparison_table": comparison_table,
+        "scenario_plans": scenario_plans,
+    }
+
+
 def _filter_roster_to_shift(df: pd.DataFrame, shift_filter: str) -> pd.DataFrame:
     if shift_filter == "ALL":
         return df
@@ -1693,6 +1882,7 @@ def run_full_pipeline(
     shift_deadlines: Optional[Dict[str, int]] = None,
     shift_filter: str = "ALL",
     plan_history_mode: Optional[str] = None,
+    return_scenarios: bool = False,
 ):
     shift_filter = str(shift_filter or "ALL").strip().upper()
     if shift_filter != "ALL" and shift_filter not in {"A", "B", "C"}:
@@ -1774,6 +1964,19 @@ def run_full_pipeline(
 
     # Generate Excel with separate sheets for each shift + Raw Data
     generate_transport_roster_workbook(all_results, output_excel_path, raw_df=df, facility=facility)
+
+    if return_scenarios:
+        scenarios_report = evaluate_all_scenarios(
+            all_employees,
+            stop_lookup,
+            facility,
+            resolution_details,
+            shift_deadlines,
+            shift_filter,
+            baseline_results=all_results,
+        )
+        return all_results, scenarios_report
+
     return all_results
 
 

@@ -6,8 +6,9 @@ No other module may define or hardcode these values.
 """
 
 import os
+import json
 from pathlib import Path
-from typing import Dict, Tuple
+from typing import Dict, Tuple, List, Optional, Any
 from pydantic import BaseModel
 from dotenv import load_dotenv
 
@@ -147,6 +148,8 @@ class AppConfig:
     PLAN_HISTORY_DIR.mkdir(parents=True, exist_ok=True)
     PLAN_HISTORY_MODE: str = os.getenv("PLAN_HISTORY_MODE", "use").strip().lower()
     KM_REGRESSION_TOLERANCE_PCT: float = float(os.getenv("KM_REGRESSION_TOLERANCE_PCT", "5.0"))
+    SCENARIOS_FILE: Path = Path(os.getenv("SCENARIOS_FILE", str(DATA_DIR / "scenarios.json")))
+    ROUTE_NEAR_LIMIT_SEC: float = float(os.getenv("ROUTE_NEAR_LIMIT_SEC", "120.0"))
 
     # File Paths
     MASTER_STOPS_FILE: Path = SEED_DIR / "stops_seed.json"
@@ -155,3 +158,29 @@ class AppConfig:
 
 
 config = AppConfig()
+
+
+def load_scenarios(scenarios_file: Optional[Path] = None) -> List[Dict[str, Any]]:
+    """Loads scenarios from JSON file. The first scenario is ALWAYS 'current config' (no overrides)."""
+    base_scenario = {
+        "name": "current config",
+        "description": "Current active configuration (no overrides)",
+        "overrides": {},
+    }
+    scenarios = [base_scenario]
+    target_path = scenarios_file or config.SCENARIOS_FILE
+    if target_path and target_path.exists():
+        try:
+            with open(target_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, list):
+                for item in data:
+                    if isinstance(item, dict) and item.get("name"):
+                        scenarios.append({
+                            "name": str(item["name"]).strip(),
+                            "description": str(item.get("description", "")).strip(),
+                            "overrides": dict(item.get("overrides", item.get("parameters", {}))),
+                        })
+        except Exception as e:
+            print(f"[Config] Warning: Could not load scenarios from {target_path}: {e}")
+    return scenarios

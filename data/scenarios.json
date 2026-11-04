@@ -1,0 +1,43 @@
+[
+  {
+    "name": "Tight Dwell (60s stop, 5s/pax)",
+    "description": "Reduces stop dwell from 90s to 60s and boarding from 10s to 5s per passenger",
+    "overrides": {
+      "STOP_DWELL_SECONDS": 60.0,
+      "BOARDING_SECONDS_PER_PASSENGER": 5.0
+    }
+  },
+  {
+    "name": "Extended Window (75m hard, 65m soft)",
+    "description": "Widens the maximum commute allowance by 5 minutes",
+    "overrides": {
+      "PICKUP_WINDOW_HARD": 75.0,
+      "PICKUP_WINDOW_SOFT": 65.0
+    }
+  },
+  {
+    "name": "5m Arrival Buffer",
+    "description": "Shortens the facility buffer from 10m to 5m, freeing 5m for commute",
+    "overrides": {
+      "ARRIVAL_BUFFER_MINUTES": 5.0
+    }
+  },
+  {
+    "name": "Wide Cluster (600m pickup merge)",
+    "description": "Merges close pickups within 600 meters instead of 400 meters",
+    "overrides": {
+      "PICKUP_MERGE_RADIUS_METERS": 600.0
+    }
+  },
+  {
+    "name": "Relaxed Operations (70m ride limit, 60s dwell)",
+    "description": "Combines 60s dwell with 70-minute maximum ride time",
+    "overrides": {
+      "STOP_DWELL_SECONDS": 60.0,
+      "BOARDING_SECONDS_PER_PASSENGER": 5.0,
+      "PICKUP_WINDOW_HARD": 80.0,
+      "PICKUP_WINDOW_SOFT": 70.0
+    }
+  }
+]
+

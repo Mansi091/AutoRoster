@@ -252,7 +252,7 @@ async def plan_multi_shift(request: Request, user: dict = Depends(require_authen
         await run_in_threadpool(raw_path.write_bytes, contents)
 
         out_path = user_output_dir / "LATEST.xlsx"
-        results = await run_in_threadpool(
+        pipeline_output = await run_in_threadpool(
             run_full_pipeline,
             raw_path,
             out_path,
@@ -260,7 +260,12 @@ async def plan_multi_shift(request: Request, user: dict = Depends(require_authen
             resolve_roster_pickup_coordinates,
             shift_deadlines,
             shift_filter,
+            return_scenarios=True,
         )
+        if isinstance(pipeline_output, tuple) and len(pipeline_output) == 2:
+            results, scenarios_report = pipeline_output
+        else:
+            results, scenarios_report = pipeline_output, None
         all_routes = [route for shift in results for route in shift.get("routes", [])]
 
         # Automatically archive to history immediately upon generation
@@ -289,6 +294,7 @@ async def plan_multi_shift(request: Request, user: dict = Depends(require_authen
             "excel_available": out_path.exists(),
             "excel_filename": "FINAL_OPTIMIZED_BUS_ROSTER.xlsx",
             "history_record": history_record,
+            "scenarios": scenarios_report,
         }
     except Exception as e:
         logger.error(f"Error in /api/plan_multi_shift: {e}", exc_info=True)
