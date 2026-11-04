@@ -1,9 +1,11 @@
+DEFAULT_FACILITY = {"name": "JCB India Ltd", "lat": 18.7765871, "lon": 73.6669931}
+
 """Pickup Aggregator and Road Travel-Time Matrix Builder for CVRPTW.
 
 Step 2 & Step 3 Implementation:
 - Step 2: Aggregates cleaned employee rows into unique physical pickup stops with verified coordinates & demand.
 - Step 3: Constructs the road travel-time matrix (in integer minutes) and distance matrix using
-  OSRM / Geoapify table routing between all pairs:
+  OSRM table routing between all pairs:
   [Node 0: Bus Depot/Start] -> [Node 1 ... n-2: Unique Stops] -> [Node n-1: Workplace Facility].
 """
 
@@ -11,6 +13,7 @@ import json
 import logging
 import math
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Dict, List, Tuple, Any, Optional
@@ -25,40 +28,54 @@ from utils import haversine_km
 
 LOGGER = logging.getLogger(__name__)
 
-# Drop point facility: JCB India Ltd (18.7765871, 73.6947478)
-DEFAULT_FACILITY = {
-    "name": "JCB India Ltd, Talegaon",
-    "lat": 18.7765871,
-    "lon": 73.6947478,
-}
+# Load facility, depot, and parameters from settings.json
+def _load_settings():
+    settings_file = ROOT / "settings.json"
+    if settings_file.exists():
+        with open(settings_file, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {
+        "facility": {"name": "JCB India Ltd, Talegaon", "latitude": 18.7765871, "longitude": 73.6947478},
+        "depot": {"name": "Central Bus Depot", "latitude": 18.7300, "longitude": 73.6800},
+        "bus_capacity": 32,
+    }
 
-# Default fleet depot origin (Talegaon / Pune depot hub)
-DEFAULT_DEPOT = {
-    "name": "Central Bus Depot",
-    "lat": 18.7300,
-    "lon": 73.6800,
-}
+_SETTINGS = _load_settings()
 
-OSRM_TABLE_URL = "https://router.project-osrm.org/table/v1/driving"
+def get_facility() -> Dict[str, Any]:
+    f = _SETTINGS.get("facility", {})
+    return {"name": f.get("name", "Facility"), "lat": f.get("latitude", 18.7765871), "lon": f.get("longitude", 73.6947478)}
+
+def get_depot() -> Dict[str, Any]:
+    d = _SETTINGS.get("depot") or {}
+    return {"name": d.get("name", "Central Bus Depot"), "lat": d.get("latitude", 18.7300), "lon": d.get("longitude", 73.6800)}
+
+OSRM_TABLE_URL = _SETTINGS.get("osrm_url", "https://router.project-osrm.org").rstrip("/") + "/table/v1/driving"
 _MATRIX_CACHE: Dict[str, Tuple[List[List[int]], List[List[float]]]] = {}
 
+def get_primary_shift(val: Any, priority: List[str] = ["A", "B", "C"]) -> str:
+    """Earliest configured shift resolution (e.g., 'A+B' -> 'A')."""
+    tokens = [t for t in re.split(r"[\s+,&/]+", str(val).upper()) if t]
+    for p in priority:
+        if p in tokens:
+            return p
+    return "A"
 
 def aggregate_employee_stops(
     employees_df: pd.DataFrame,
     shift_filter: Optional[str] = "A",
-    bus_capacity: int = 32
+    bus_capacity: Optional[int] = None,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """Aggregates individual employee rows into unique pickup stops.
 
     Handles large pickup groups by splitting any stop with demand > bus_capacity
     into multiple manageable units of size <= bus_capacity.
-
-    Returns:
-        (aggregated_stops, unverified_employees)
     """
+    cap = bus_capacity or int(_SETTINGS.get("bus_capacity", 32))
     df = employees_df.copy()
     if shift_filter and "shift" in df.columns:
-        df = df[df["shift"].astype(str).str.upper().str.contains(shift_filter, na=False)]
+        df["primary_shift"] = df["shift"].apply(lambda v: get_primary_shift(v))
+        df = df[df["primary_shift"] == shift_filter.upper()]
 
     unique_pickup_names = [p for p in df["pickup_point"].dropna().unique() if str(p).strip()]
     resolved_locations = resolve_pickup_points(unique_pickup_names)
@@ -88,7 +105,6 @@ def aggregate_employee_stops(
         lon = loc_info["longitude"]
         canonical_name = loc_info.get("canonical_name", p_name)
 
-        # Key by canonical name & rounded coordinates to merge duplicate spelling variants
         coord_key = f"{round(lat, 4)}_{round(lon, 4)}"
 
         if coord_key not in stops_grouped:
@@ -100,25 +116,23 @@ def aggregate_employee_stops(
             }
         stops_grouped[coord_key]["employees"].append(emp_dict)
 
-    # Process demands and split any oversized stops if count > bus_capacity
     final_stops: List[Dict[str, Any]] = []
 
     for key, data in stops_grouped.items():
         total_pax = len(data["employees"])
-        if total_pax <= bus_capacity:
+        if total_pax <= cap:
             final_stops.append({
                 "stop_name": data["stop_name"],
                 "lat": data["lat"],
                 "lon": data["lon"],
                 "demand": total_pax,
-                "service_minutes": max(1, math.ceil(total_pax * 0.25)),  # dwell time ~15 sec per passenger
+                "service_minutes": max(1, math.ceil(total_pax * 0.25)),
                 "employees": data["employees"],
             })
         else:
-            # Split into chunks of size bus_capacity
             emps = data["employees"]
-            for chunk_idx, i in enumerate(range(0, total_pax, bus_capacity), 1):
-                chunk = emps[i:i + bus_capacity]
+            for chunk_idx, i in enumerate(range(0, total_pax, cap), 1):
+                chunk = emps[i:i + cap]
                 final_stops.append({
                     "stop_name": f"{data['stop_name']} (Group {chunk_idx})",
                     "lat": data["lat"],
@@ -130,21 +144,11 @@ def aggregate_employee_stops(
 
     return final_stops, unverified
 
-
 def fetch_road_time_matrix(
     nodes: List[Dict[str, Any]],
-    timeout_sec: int = 20
+    timeout_sec: int = 20,
 ) -> Tuple[List[List[int]], List[List[float]]]:
-    """Builds the N x N road travel time matrix (integer minutes) and distance matrix (km).
-
-    Uses OSRM Table API with automated Haversine road-factor fallback for robustness.
-
-    Args:
-        nodes: Ordered list of nodes, where each dict has 'lat' and 'lon'.
-
-    Returns:
-        (time_matrix_minutes, distance_matrix_km)
-    """
+    """Builds the N x N road travel time matrix (integer minutes) and distance matrix (km)."""
     n = len(nodes)
     if n == 0:
         return [], []
@@ -179,12 +183,11 @@ def fetch_road_time_matrix(
 
                         if sec is not None and not math.isnan(sec):
                             mins = max(1, math.ceil(sec / 60.0))
-                            km = round(metres / 1000.0, 2) if metres else round(mins * 0.5, 2)
+                            km = round(metres / 1000.0, 2) if metres is not None else round(mins * 0.5, 2)
                         else:
-                            # Fallback if OSRM returned null for disconnected node
                             h_km = haversine_km(nodes[i]["lat"], nodes[i]["lon"], nodes[j]["lat"], nodes[j]["lon"])
-                            km = round(h_km * 1.35, 2)
-                            mins = max(1, math.ceil(km / 35.0 * 60))
+                            km = round(h_km * float(_SETTINGS.get("fallback_road_factor", 1.45)), 2)
+                            mins = max(1, math.ceil(km / float(_SETTINGS.get("fallback_speed_kmph", 28.0)) * 60))
 
                         t_row.append(int(mins))
                         d_row.append(float(km))
@@ -197,9 +200,11 @@ def fetch_road_time_matrix(
     except Exception as e:
         LOGGER.warning(f"OSRM Table API fetch failed ({e}); using calibrated road network model.")
 
-    # Calibrated fallback based on Pune road curvature factor (1.4x straight line @ 32 km/h avg speed)
     time_matrix = []
     dist_matrix = []
+    road_factor = float(_SETTINGS.get("fallback_road_factor", 1.45))
+    speed = float(_SETTINGS.get("fallback_speed_kmph", 28.0))
+
     for i in range(n):
         t_row = []
         d_row = []
@@ -209,8 +214,8 @@ def fetch_road_time_matrix(
                 d_row.append(0.0)
             else:
                 straight_km = haversine_km(nodes[i]["lat"], nodes[i]["lon"], nodes[j]["lat"], nodes[j]["lon"])
-                road_km = round(straight_km * 1.4, 2)
-                mins = max(1, math.ceil(road_km / 32.0 * 60))
+                road_km = round(straight_km * road_factor, 2)
+                mins = max(1, math.ceil(road_km / speed * 60))
                 t_row.append(int(mins))
                 d_row.append(float(road_km))
         time_matrix.append(t_row)
@@ -218,33 +223,25 @@ def fetch_road_time_matrix(
 
     return time_matrix, dist_matrix
 
-
 def prepare_cvrptw_inputs_for_shift(
-    cleaned_excel_path: Path,
+    excel_path: Path,
     shift: str = "A",
-    depot: Dict[str, Any] = DEFAULT_DEPOT,
-    facility: Dict[str, Any] = DEFAULT_FACILITY,
-    max_stops: Optional[int] = None
+    sheet_name: Optional[str] = None,
+    depot: Optional[Dict[str, Any]] = None,
+    facility: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """Full Step 2 & Step 3 pipeline:
+    """Reads employee roster, groups by stop, attaches depot & facility, and returns CVRPTW payload."""
+    fac = facility or get_facility()
+    dep = depot or get_depot()
+    target_sheet = sheet_name or (0 if "MAIN" in str(excel_path) else "Employees")
 
-    Reads cleaned employee roster, groups by stop, attaches depot & facility,
-    and returns complete CVRPTW input payload.
-    """
-    df = pd.read_excel(cleaned_excel_path, sheet_name="Employees" if "cleaned" in str(cleaned_excel_path) else 0)
+    df = pd.read_excel(excel_path, sheet_name=target_sheet)
     stops, unverified = aggregate_employee_stops(df, shift_filter=shift)
 
-    if max_stops and len(stops) > max_stops:
-        stops = stops[:max_stops]
-
-    # Full node list ordered exactly as:
-    # 0 = Depot
-    # 1 ... n-2 = Pickup stops
-    # n-1 = Workplace Facility
     all_nodes = [
-        {"stop_name": depot["name"], "lat": depot["lat"], "lon": depot["lon"], "demand": 0, "service_minutes": 0, "employees": []},
+        {"stop_name": dep["name"], "lat": dep["lat"], "lon": dep["lon"], "demand": 0, "service_minutes": 0, "employees": []},
         *stops,
-        {"stop_name": facility["name"], "lat": facility["lat"], "lon": facility["lon"], "demand": 0, "service_minutes": 0, "employees": []},
+        {"stop_name": fac["name"], "lat": fac["lat"], "lon": fac["lon"], "demand": 0, "service_minutes": 0, "employees": []},
     ]
 
     time_matrix, dist_matrix = fetch_road_time_matrix(all_nodes)
@@ -266,24 +263,3 @@ def prepare_cvrptw_inputs_for_shift(
         "time_matrix": time_matrix,
         "distance_matrix": dist_matrix,
     }
-
-
-if __name__ == "__main__":
-    import pprint
-    data_file = ROOT / "output/01_cleaned_employees.xlsx"
-    if not data_file.exists():
-        data_file = ROOT / "data/input/MAIN_SHEET_TWO_RAW_DATA.xlsx"
-
-    print(f"Reading roster from {data_file} for Shift A...")
-    prepared = prepare_cvrptw_inputs_for_shift(data_file, shift="A", max_stops=10)
-
-    print("\n--- STEP 2: Aggregated Stops Summary ---")
-    print(f"Total stops: {prepared['total_stops']}, Total routed employees: {prepared['total_employees']}")
-    print("Sample Nodes & Demands:")
-    for i, name in enumerate(prepared['stop_names']):
-        print(f"  Node {i:2d}: {name:<45} (Demand: {prepared['demands'][i]:2d} emps, Service: {prepared['service_minutes'][i]} min)")
-
-    print("\n--- STEP 3: Road Travel-Time Matrix (minutes) ---")
-    print("Header:", [f"N{i}" for i in range(len(prepared['nodes']))])
-    for row_idx, row in enumerate(prepared['time_matrix']):
-        print(f"Node {row_idx:2d}:", [f"{val:2d}m" for val in row])

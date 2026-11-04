@@ -82,12 +82,11 @@ def optimize_routes(
     manager = pywrapcp.RoutingIndexManager(n, num_buses, starts, ends)
     routing = pywrapcp.RoutingModel(manager)
 
-    # 1. Travel Time Callback
+    # 1. Travel Time Callback with consistent dwell time
     def time_callback(from_index: int, to_index: int) -> int:
         from_node = manager.IndexToNode(from_index)
         to_node = manager.IndexToNode(to_index)
-        # Travel time between nodes + boarding/service dwell time at departure stop
-        dwell = service_minutes[from_node] if from_node != depot_index else 0
+        dwell = service_minutes[from_node]
         return int(time_matrix[from_node][to_node] + dwell)
 
     transit_callback_index = routing.RegisterTransitCallback(time_callback)
@@ -118,32 +117,28 @@ def optimize_routes(
     )
     time_dimension = routing.GetDimensionOrDie("Time")
 
-    # Time window constraints:
-    # Ensure buses arrive at the facility before latest_arrival (shift_start - buffer)
-    # The departure time can be early enough to complete the route within max_route_minutes.
-    calc_earliest_dep = min(earliest_departure, latest_arrival - max_route_minutes - 30)
-
     for vehicle_id in range(num_buses):
         depot_start_index = routing.Start(vehicle_id)
         time_dimension.CumulVar(depot_start_index).SetRange(
-            int(calc_earliest_dep), int(latest_arrival)
+            int(earliest_departure), int(latest_arrival)
         )
 
         # Facility arrival window
         dest_end_index = routing.End(vehicle_id)
         time_dimension.CumulVar(dest_end_index).SetRange(
-            int(calc_earliest_dep), int(latest_arrival)
+            int(earliest_departure), int(latest_arrival)
         )
 
         # Set route duration limit if max_route_minutes is specified
         if max_route_minutes and max_route_minutes > 0:
             time_dimension.SetSpanUpperBoundForVehicle(int(max_route_minutes), vehicle_id)
 
-    # Intermediate pickup stops: must be visited between earliest possible departure and latest arrival
+    # Per-passenger ride limit: no passenger may board earlier than (latest_arrival - max_route_minutes)
+    min_board_time = max(earliest_departure, latest_arrival - max_route_minutes)
     for stop_node in range(1, n - 1):
         index = manager.NodeToIndex(stop_node)
         time_dimension.CumulVar(index).SetRange(
-            int(calc_earliest_dep), int(latest_arrival)
+            int(min_board_time), int(latest_arrival)
         )
 
     # Minimize total vehicles used by adding fixed vehicle cost
