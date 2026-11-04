@@ -18,6 +18,7 @@ import math
 import datetime
 import json
 import difflib
+import hashlib
 from pathlib import Path
 from typing import Dict, List, Tuple, Any, Optional
 
@@ -44,6 +45,13 @@ BOARDING_SECONDS_PER_PASSENGER = getattr(config.COMMUTE, "dwell_seconds_per_pass
 KM_WEIGHT = getattr(config, "KM_WEIGHT", getattr(config.COMMUTE, "km_weight", 0.05))
 MERGE_RADIUS_METERS = config.PICKUP_MERGE_RADIUS_METERS
 SOLVER_TIME_LIMIT_SECONDS = getattr(config, "ROUTE_SOLVER_TIME_LIMIT_SECONDS", 20)
+
+ROUTE_TIME_TOLERANCE_SEC = getattr(config, "ROUTE_TIME_TOLERANCE_SEC", 60.0)
+OSRM_ROUTE_CONTINUE_STRAIGHT = getattr(config, "OSRM_ROUTE_CONTINUE_STRAIGHT", "false").strip().lower()
+FEASIBILITY_SOURCE = getattr(config, "FEASIBILITY_SOURCE", "table").strip().lower()
+PLAN_HISTORY_DIR = Path(getattr(config, "PLAN_HISTORY_DIR", "data/plan_history"))
+PLAN_HISTORY_DIR.mkdir(parents=True, exist_ok=True)
+KM_REGRESSION_TOLERANCE_PCT = getattr(config, "KM_REGRESSION_TOLERANCE_PCT", 5.0)
 
 def _display_clock(minutes: int) -> str:
     hour, minute = (minutes // 60) % 24, minutes % 60
@@ -356,13 +364,27 @@ def get_road_matrix(nodes: List[Dict[str, Any]]) -> Tuple[List[List[int]], List[
     raise RuntimeError(f"OSRM could not build a road-time matrix ({response_status}).")
 
 
-def fetch_osrm_route_geometry(waypoints: List[Tuple[float, float]]) -> Dict[str, Any]:
+def fetch_osrm_route_geometry(
+    waypoints: List[Tuple[float, float]],
+    continue_straight: Optional[str] = None,
+) -> Dict[str, Any]:
     """Fetches real turn-by-turn road geometry coordinates along paved roads via OSRM."""
     if len(waypoints) < 2:
-        return {"coordinates": waypoints, "distance_km": 0.0, "duration_min": 0.0}
+        return {
+            "coordinates": waypoints,
+            "distance_km": 0.0,
+            "distance_m": 0.0,
+            "duration_min": 0.0,
+            "duration_sec": 0.0,
+            "leg_durations_min": [],
+            "leg_durations_sec": [],
+            "leg_distances_km": [],
+            "leg_distances_m": [],
+        }
 
+    cs = (continue_straight if continue_straight is not None else OSRM_ROUTE_CONTINUE_STRAIGHT).strip().lower()
     cache = load_json_cache(OSRM_GEOM_CACHE_FILE)
-    w_key = config.OSRM_ROUTE_URL + "|osrm-route-v3:" + ";".join(
+    w_key = config.OSRM_ROUTE_URL + f"|osrm-route-v4:{cs}:" + ";".join(
         [f"{lat:.6f},{lon:.6f}" for lat, lon in waypoints]
     )
     if w_key in cache and isinstance(cache[w_key], dict):
@@ -375,7 +397,7 @@ def fetch_osrm_route_geometry(waypoints: List[Tuple[float, float]]) -> Dict[str,
             return cached
 
     coords_str = ";".join([f"{lon:.6f},{lat:.6f}" for lat, lon in waypoints])
-    url = f"{config.OSRM_ROUTE_URL.rstrip('/')}/{coords_str}?overview=full&geometries=geojson"
+    url = f"{config.OSRM_ROUTE_URL.rstrip('/')}/{coords_str}?overview=full&geometries=geojson&continue_straight={cs}"
     try:
         res = requests.get(url, timeout=10, headers={"User-Agent": "AutoRoster/1.0"})
         if res.status_code == 200:
@@ -416,6 +438,190 @@ def fetch_osrm_route_geometry(waypoints: List[Tuple[float, float]]) -> Dict[str,
     raise RuntimeError("OSRM could not return mapped road geometry; refusing to draw straight-line routes.")
 
 
+def route_duration_sec(
+    sequence: List[int],
+    nodes: List[Dict[str, Any]],
+    time_matrix: List[List[int]],
+    plant_node: int,
+    facility: Optional[Dict[str, Any]] = None,
+    source: Optional[str] = None,
+) -> Tuple[float, float, float]:
+    """Single authority for route duration in seconds: (total_sec, drive_sec, dwell_sec).
+    Data source = FEASIBILITY_SOURCE ('table' | 'route').
+    With 'table': Route API is used ONLY for map geometry, never to split routes.
+    """
+    if not sequence:
+        return 0.0, 0.0, 0.0
+    src = (source or FEASIBILITY_SOURCE).strip().lower()
+    dwell_sec = float(sum(_stop_dwell_seconds(idx, nodes) for idx in sequence))
+    if src == "route" and facility:
+        waypoints = [(nodes[idx]["lat"], nodes[idx]["lon"]) for idx in sequence]
+        waypoints.append((facility["lat"], facility["lon"]))
+        info = fetch_osrm_route_geometry(waypoints)
+        leg_secs = info.get("leg_durations_sec")
+        if not leg_secs:
+            leg_secs = [m * 60.0 for m in (info.get("leg_durations_min") or [])]
+        drive_sec = float(sum(leg_secs))
+    else:
+        # Default: 'table'
+        drive_sec = float(
+            sum(time_matrix[a][b] for a, b in zip(sequence, sequence[1:]))
+            + time_matrix[sequence[-1]][plant_node]
+        )
+    total_sec = drive_sec + dwell_sec
+    return total_sec, drive_sec, dwell_sec
+
+
+def compute_plan_signature(
+    shift: str,
+    nodes: List[Dict[str, Any]],
+    facility: Dict[str, Any],
+    num_pickups: int,
+) -> str:
+    """Computes a deterministic hash of (roster employees+stops, facility, shift, ride limits, capacity)."""
+    canonical_pickups = []
+    for idx in range(num_pickups):
+        node = nodes[idx]
+        emp_ids = sorted([
+            str(e.get("emp_name", "")) + ":" + str(e.get("mobile", ""))
+            for e in node.get("employees", [])
+        ])
+        canonical_pickups.append({
+            "name": node.get("name", ""),
+            "lat": round(float(node.get("lat", 0.0)), 6),
+            "lon": round(float(node.get("lon", 0.0)), 6),
+            "demand": int(node.get("demand", 0)),
+            "employees": emp_ids,
+        })
+    canonical_pickups.sort(key=lambda x: (x["name"], x["lat"], x["lon"]))
+
+    payload = {
+        "shift": str(shift).upper(),
+        "facility": {
+            "name": str(facility.get("name", "")),
+            "lat": round(float(facility.get("lat", 0.0)), 6),
+            "lon": round(float(facility.get("lon", 0.0)), 6),
+        },
+        "ride_limits": {
+            "hard_sec": int(MAX_RIDE_TIME_SEC),
+            "target_sec": int(TARGET_RIDE_TIME_SEC),
+        },
+        "capacity": int(BUS_CAPACITY),
+        "pickups": canonical_pickups,
+    }
+    encoded = json.dumps(payload, sort_keys=True).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def get_plan_history_path(shift: str, signature_hash: str) -> Path:
+    PLAN_HISTORY_DIR.mkdir(parents=True, exist_ok=True)
+    return PLAN_HISTORY_DIR / f"plan_{shift}_{signature_hash[:16]}.json"
+
+
+def save_stored_plan(
+    signature_hash: str,
+    shift: str,
+    routes_output: List[Dict[str, Any]],
+    total_km: float,
+    config_snapshot: Optional[Dict[str, Any]] = None,
+) -> Path:
+    """Save the plan to PLAN_HISTORY_DIR."""
+    plan_path = get_plan_history_path(shift, signature_hash)
+    payload = {
+        "signature_hash": signature_hash,
+        "shift": shift,
+        "buses": len(routes_output),
+        "total_km": total_km,
+        "routes": [
+            {
+                "route_no": r["route_no"],
+                "stops": [
+                    {"stop_name": s["stop_name"], "lat": s["lat"], "lon": s["lon"], "demand": s["demand"]}
+                    for s in r["stops"]
+                ],
+                "total_passengers": r["total_passengers"],
+                "total_distance_km": r["total_distance_km"],
+                "route_duration_sec": r.get("route_duration_sec"),
+            }
+            for r in routes_output
+        ],
+        "config_snapshot": config_snapshot or {
+            "BUS_CAPACITY": BUS_CAPACITY,
+            "MAX_RIDE_TIME_SEC": MAX_RIDE_TIME_SEC,
+            "TARGET_RIDE_TIME_SEC": TARGET_RIDE_TIME_SEC,
+            "KM_WEIGHT": KM_WEIGHT,
+            "FEASIBILITY_SOURCE": FEASIBILITY_SOURCE,
+            "ROUTE_TIME_TOLERANCE_SEC": ROUTE_TIME_TOLERANCE_SEC,
+        },
+        "saved_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    }
+    with open(plan_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2)
+    print(f"[PlanHistory] Saved plan with {len(routes_output)} buses, {total_km:.1f} km to {plan_path.name}")
+    return plan_path
+
+
+def load_stored_plan(
+    signature_hash: str,
+    shift: str,
+    nodes: List[Dict[str, Any]],
+    time_matrix: List[List[int]],
+    plant_node: int,
+    facility: Dict[str, Any],
+) -> Optional[Tuple[List[List[int]], Dict[str, Any]]]:
+    """Loads previous best plan if it exists and checks feasibility with CURRENT route_duration_sec and capacity."""
+    plan_path = get_plan_history_path(shift, signature_hash)
+    if not plan_path.exists():
+        return None
+    try:
+        with open(plan_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as e:
+        print(f"[PlanHistory] Warning: Could not read {plan_path}: {e}")
+        return None
+
+    # Map stored stops to current nodes
+    node_by_name_and_coord = {}
+    for idx, node in enumerate(nodes[:plant_node]):
+        k = (node["name"], round(float(node["lat"]), 5), round(float(node["lon"]), 5))
+        node_by_name_and_coord[k] = idx
+        node_by_name_and_coord[node["name"]] = idx
+
+    reconstructed_routes: List[List[int]] = []
+    used_nodes = set()
+
+    for r in data.get("routes", []):
+        r_indices = []
+        for s in r.get("stops", []):
+            k = (s["stop_name"], round(float(s["lat"]), 5), round(float(s["lon"]), 5))
+            idx = node_by_name_and_coord.get(k)
+            if idx is None:
+                idx = node_by_name_and_coord.get(s["stop_name"])
+            if idx is None or idx in used_nodes:
+                return None  # Node mismatch or duplicate
+            r_indices.append(idx)
+            used_nodes.add(idx)
+        if r_indices:
+            reconstructed_routes.append(r_indices)
+
+    # Check that all pickups are covered
+    if len(used_nodes) != plant_node:
+        return None
+
+    # Re-check feasibility with CURRENT route_duration_sec and capacity
+    for r_seq in reconstructed_routes:
+        pax = sum(int(nodes[i]["demand"]) for i in r_seq)
+        if pax > BUS_CAPACITY:
+            print(f"[PlanHistory] Previous plan is INFEASIBLE: Bus pax {pax} > {BUS_CAPACITY}")
+            return None
+        dur_sec, _, _ = route_duration_sec(r_seq, nodes, time_matrix, plant_node, facility)
+        if dur_sec > MAX_RIDE_TIME_SEC:
+            print(f"[PlanHistory] Previous plan is INFEASIBLE: Bus duration {dur_sec:.1f}s > {MAX_RIDE_TIME_SEC}s")
+            return None
+
+    print(f"[PlanHistory] Loaded feasible previous plan ({len(reconstructed_routes)} buses, {data.get('total_km', 0.0):.1f} km).")
+    return reconstructed_routes, data
+
 
 def build_corridor_label(stops: List[str]) -> str:
     """Builds a human-readable corridor name from prominent landmarks along the route."""
@@ -434,81 +640,72 @@ def build_corridor_label(stops: List[str]) -> str:
 def repair_route_sequences(
     stop_indices: List[int],
     nodes: List[Dict[str, Any]],
+    time_matrix: List[List[int]],
+    plant_node: int,
     facility: Dict[str, Any],
+    source: Optional[str] = None,
 ) -> Tuple[List[Tuple[List[int], Dict[str, Any]]], List[int]]:
-    """Validate routes on mapped OSRM legs in seconds and split any route over the hard ride limit."""
-    route_cache: Dict[Tuple[int, ...], Tuple[Dict[str, Any], float]] = {}
+    """Validate routes using route_duration_sec and split any route over MAX_RIDE_TIME_SEC.
+    With 'table': Route API is used ONLY for map geometry, never to split routes.
+    """
+    src = (source or FEASIBILITY_SOURCE).strip().lower()
+    route_cache: Dict[Tuple[int, ...], float] = {}
 
-    def evaluate(sequence: List[int]) -> Tuple[Dict[str, Any], float]:
+    def get_ride_sec(sequence: List[int]) -> float:
         key = tuple(sequence)
         if key not in route_cache:
-            waypoints = [(nodes[idx]["lat"], nodes[idx]["lon"]) for idx in sequence]
-            waypoints.append((facility["lat"], facility["lon"]))
-            info = fetch_osrm_route_geometry(waypoints)
-            leg_secs = info.get("leg_durations_sec")
-            if not leg_secs:
-                leg_secs = [m * 60.0 for m in (info.get("leg_durations_min") or [])]
-            if len(leg_secs) != len(sequence):
-                raise RuntimeError("OSRM did not return a travel time for every route leg; no route was published.")
-            total_dwell_sec = sum(_stop_dwell_seconds(idx, nodes) for idx in sequence)
-            ride_sec = float(sum(leg_secs) + total_dwell_sec)
-            route_cache[key] = (info, ride_sec)
+            total_sec, _, _ = route_duration_sec(
+                sequence, nodes, time_matrix, plant_node, facility, source=src
+            )
+            route_cache[key] = total_sec
         return route_cache[key]
 
-    def split(sequence: List[int]) -> Tuple[List[Tuple[List[int], Dict[str, Any]]], List[int]]:
-        try:
-            info, ride_sec = evaluate(sequence)
-        except UnreachableRoadRouteError:
-            if len(sequence) == 1:
-                return [], sequence
-            options = []
-            for cut in range(1, len(sequence)):
-                left_routes, left_outliers = split(sequence[:cut])
-                right_routes, right_outliers = split(sequence[cut:])
-                candidate_routes = left_routes + right_routes
-                candidate_outliers = left_outliers + right_outliers
-                max_duration = max(
-                    (evaluate(r)[1] for r, _ in candidate_routes),
-                    default=0.0,
-                )
-                options.append((
-                    len(candidate_outliers), len(candidate_routes), max_duration,
-                    candidate_routes, candidate_outliers,
-                ))
-            best = min(options, key=lambda item: item[:3])
-            return best[3], best[4]
-
+    def split(sequence: List[int]) -> Tuple[List[List[int]], List[int]]:
+        ride_sec = get_ride_sec(sequence)
         if ride_sec <= MAX_RIDE_TIME_SEC:
-            return [(sequence, info)], []
+            return [sequence], []
         if len(sequence) == 1:
             return [], sequence
 
         candidates = []
         for cut in range(1, len(sequence)):
             left, right = sequence[:cut], sequence[cut:]
-            left_info, left_ride = evaluate(left)
-            right_info, right_ride = evaluate(right)
+            left_ride = get_ride_sec(left)
+            right_ride = get_ride_sec(right)
             candidates.append((
                 max(left_ride, right_ride),
                 left_ride + right_ride,
                 abs(len(left) - len(right)),
                 left,
                 right,
-                left_info,
-                right_info,
             ))
 
         feasible_splits = [candidate for candidate in candidates if candidate[0] <= MAX_RIDE_TIME_SEC]
         if feasible_splits:
             best = min(feasible_splits, key=lambda candidate: candidate[:3])
-            return [(best[3], best[5]), (best[4], best[6])], []
+            return [best[3], best[4]], []
 
         best = min(candidates, key=lambda candidate: candidate[:3])
         left_routes, left_outliers = split(best[3])
         right_routes, right_outliers = split(best[4])
         return left_routes + right_routes, left_outliers + right_outliers
 
-    return split(stop_indices)
+    split_routes, outliers = split(stop_indices)
+
+    # Attach map geometry from OSRM Route API for each final accepted sequence
+    final_routes: List[Tuple[List[int], Dict[str, Any]]] = []
+    for r_seq in split_routes:
+        waypoints = [(nodes[idx]["lat"], nodes[idx]["lon"]) for idx in r_seq]
+        waypoints.append((facility["lat"], facility["lon"]))
+        try:
+            geom_info = fetch_osrm_route_geometry(waypoints)
+        except UnreachableRoadRouteError:
+            outliers.extend(r_seq)
+            continue
+        final_routes.append((r_seq, geom_info))
+
+    return final_routes, outliers
+
 
 
 def improve_validated_route_sequences(
@@ -517,24 +714,24 @@ def improve_validated_route_sequences(
     time_matrix: List[List[int]],
     plant_node: int,
     dist_matrix: Optional[List[List[float]]] = None,
+    facility: Optional[Dict[str, Any]] = None,
+    source: Optional[str] = None,
 ) -> List[List[List[int]]]:
     """Return ranked local-search candidates scored by (buses, target_excess_seconds, total_km)."""
-    from functools import lru_cache
-
     base = [list(route) for route in route_sequences if route]
     if not base:
         return []
 
-    @lru_cache(maxsize=100_000)
+    memo_duration: Dict[Tuple[int, ...], int] = {}
+
     def duration(sequence: Tuple[int, ...]) -> int:
         if not sequence:
             return 0
-        travel_sec = sum(time_matrix[a][b] for a, b in zip(sequence, sequence[1:]))
-        travel_sec += time_matrix[sequence[-1]][plant_node]
-        dwell_sec = sum(_stop_dwell_seconds(idx, nodes) for idx in sequence)
-        return int(round(travel_sec + dwell_sec))
+        if sequence not in memo_duration:
+            tot, _, _ = route_duration_sec(list(sequence), nodes, time_matrix, plant_node, facility, source)
+            memo_duration[sequence] = int(round(tot))
+        return memo_duration[sequence]
 
-    @lru_cache(maxsize=100_000)
     def demand(sequence: Tuple[int, ...]) -> int:
         return sum(int(nodes[i]["demand"]) for i in sequence)
 
@@ -557,6 +754,7 @@ def improve_validated_route_sequences(
     def feasible(sequence: List[int]) -> bool:
         key = tuple(sequence)
         return demand(key) <= BUS_CAPACITY and duration(key) <= MAX_RIDE_TIME_SEC
+
 
     # Multiple deterministic starting orders help escape a poor initial stop
     # sequence without making route output vary randomly between runs.
@@ -878,19 +1076,18 @@ def solve_shift_routes(
         served = sum(int(nodes[idx]["demand"]) for idx in covered)
         durations_sec, distance_m = [], 0.0
         for sequence, road_info in candidate_routes:
-            leg_secs = road_info.get("leg_durations_sec")
-            if not leg_secs:
-                leg_secs = [m * 60.0 for m in (road_info.get("leg_durations_min") or [])]
-            dwell_sec = sum(_stop_dwell_seconds(idx, nodes) for idx in sequence)
-            ride_sec = sum(leg_secs) + dwell_sec
-            durations_sec.append(ride_sec)
+            tot_sec, _, _ = route_duration_sec(sequence, nodes, time_matrix, plant_node, facility)
+            durations_sec.append(tot_sec)
             dist_km = float(road_info.get("distance_km") or sum(road_info.get("leg_distances_km", [])))
             distance_m += dist_km * 1000.0
         target_excess_sec = sum(max(0.0, ride - TARGET_RIDE_TIME_SEC) for ride in durations_sec)
         total_km = round(distance_m / 1000.0, 2)
         return (-served, len(candidate_routes), int(round(target_excess_sec)), total_km)
 
-    # Phase 3: Evaluate multiple first solution strategies and keep best post-OSRM plan
+    # Phase 3 & Section B: Evaluate strategies, warm-start from previous best, and pool candidates
+    plan_signature = compute_plan_signature(shift, nodes, facility, num_pickups)
+    stored_result = load_stored_plan(plan_signature, shift, nodes, time_matrix, plant_node, facility)
+
     strategies = [
         ("PARALLEL_CHEAPEST_INSERTION", routing_enums_pb2.FirstSolutionStrategy.PARALLEL_CHEAPEST_INSERTION),
         ("SAVINGS", routing_enums_pb2.FirstSolutionStrategy.SAVINGS),
@@ -898,6 +1095,54 @@ def solve_shift_routes(
     ]
 
     candidate_plans_by_strategy = []
+
+    # If previous feasible plan exists, warm-start OR-Tools
+    if stored_result is not None:
+        prev_routes, prev_data = stored_result
+        try:
+            routes_to_assign = [list(r) for r in prev_routes] + [[] for _ in range(num_vehicles - len(prev_routes))]
+            assignment = routing.ReadAssignmentFromRoutes(routes_to_assign, True)
+            if assignment:
+                warm_search_params = pywrapcp.DefaultRoutingSearchParameters()
+                warm_search_params.local_search_metaheuristic = routing_enums_pb2.LocalSearchMetaheuristic.GUIDED_LOCAL_SEARCH
+                warm_search_params.time_limit.seconds = SOLVER_TIME_LIMIT_SECONDS
+                warm_sol = routing.SolveFromAssignmentWithParameters(assignment, warm_search_params)
+                if warm_sol:
+                    warm_routes = []
+                    for v_id in range(num_vehicles):
+                        idx = routing.Start(v_id)
+                        r_stops = []
+                        while not routing.IsEnd(idx):
+                            n_idx = manager.IndexToNode(idx)
+                            if n_idx < num_pickups:
+                                r_stops.append(n_idx)
+                            idx = warm_sol.Value(routing.NextVar(idx))
+                        if r_stops:
+                            warm_routes.append(r_stops)
+                    v_warm_routes, warm_imp = [], set()
+                    for r_stops in warm_routes:
+                        repaired, impossible = repair_route_sequences(
+                            r_stops, nodes, time_matrix, plant_node, facility
+                        )
+                        v_warm_routes.extend(repaired)
+                        warm_imp.update(impossible)
+                    warm_score = actual_plan_score(v_warm_routes)
+                    print(f"[Solver] Strategy WARM_START: served={-warm_score[0]}, buses={warm_score[1]}, excess={warm_score[2]}s, km={warm_score[3]}")
+                    candidate_plans_by_strategy.append((warm_score, v_warm_routes, warm_imp, "WARM_START"))
+        except Exception as e:
+            print(f"[Solver] Warm-start attempt notice: {e}")
+
+        # Also evaluate the stored feasible plan itself directly as a candidate!
+        prev_v_routes, prev_imp = [], set()
+        for r_stops in prev_routes:
+            repaired, impossible = repair_route_sequences(
+                r_stops, nodes, time_matrix, plant_node, facility
+            )
+            prev_v_routes.extend(repaired)
+            prev_imp.update(impossible)
+        prev_score = actual_plan_score(prev_v_routes)
+        print(f"[PlanHistory] Stored plan: served={-prev_score[0]}, buses={prev_score[1]}, excess={prev_score[2]}s, km={prev_score[3]}")
+        candidate_plans_by_strategy.append((prev_score, prev_v_routes, prev_imp, "STORED_BEST"))
 
     for strat_name, strat_enum in strategies:
         search_params = pywrapcp.DefaultRoutingSearchParameters()
@@ -925,7 +1170,9 @@ def solve_shift_routes(
         v_routes = []
         imp_nodes = set()
         for r_stops in strat_routes:
-            repaired, impossible = repair_route_sequences(r_stops, nodes, facility)
+            repaired, impossible = repair_route_sequences(
+                r_stops, nodes, time_matrix, plant_node, facility
+            )
             v_routes.extend(repaired)
             imp_nodes.update(impossible)
 
@@ -933,14 +1180,16 @@ def solve_shift_routes(
         for _ in range(2):
             curr_seqs = [seq for seq, _ in v_routes]
             cand_plans = improve_validated_route_sequences(
-                curr_seqs, nodes, time_matrix, plant_node, dist_matrix
+                curr_seqs, nodes, time_matrix, plant_node, dist_matrix, facility=facility
             )
             b_routes, b_impossible = v_routes, imp_nodes
             b_score = actual_plan_score(b_routes)
             for plan in cand_plans:
                 chk_routes, chk_impossible = [], set()
                 for r_stops in plan:
-                    repaired, impossible = repair_route_sequences(r_stops, nodes, facility)
+                    repaired, impossible = repair_route_sequences(
+                        r_stops, nodes, time_matrix, plant_node, facility
+                    )
                     chk_routes.extend(repaired)
                     chk_impossible.update(impossible)
                 sc = actual_plan_score(chk_routes)
@@ -954,13 +1203,26 @@ def solve_shift_routes(
         print(f"[Solver] Strategy {strat_name}: served={-strat_score[0]}, buses={strat_score[1]}, excess_sec={strat_score[2]}s, km={strat_score[3]}")
         candidate_plans_by_strategy.append((strat_score, v_routes, imp_nodes, strat_name))
 
+    # Diagnostic check: If solver returns more buses than stored plan, log penalty comparison
+    if stored_result is not None:
+        prev_routes, prev_data = stored_result
+        prev_buses = len(prev_routes)
+        for cand_score, cand_routes, cand_imp, cand_name in candidate_plans_by_strategy:
+            cand_buses = len(cand_routes)
+            if cand_buses > prev_buses:
+                print(f"[Diagnostic] Strategy {cand_name} produced {cand_buses} buses vs previous feasible {prev_buses} buses.")
+                print(f"  Fixed bus cost: {fixed_bus_cost}")
+                print(f"  Max soft-target penalty: {max_target_penalty}")
+                print(f"  Max km cost: {int(round(KM_WEIGHT * max_leg_meters * (num_pickups + 1)))}")
+                print(f"  Comparison: fixed_bus_cost > max_soft+km: {fixed_bus_cost > max_target_penalty}")
+
     routes_output = []
     buses_used = 0
     assigned_passengers = 0
     total_shift_km = 0.0
 
     if candidate_plans_by_strategy:
-        # Choose best plan by (served, buses, target_excess_sec, total_km)
+        # Choose best plan: (employees served desc, buses asc, target excess asc, km asc)
         best_candidate = min(candidate_plans_by_strategy, key=lambda item: item[0])
         print(f"[Solver] Selected best overall plan from strategy: {best_candidate[3]}")
         validated_routes, impossible_nodes = best_candidate[1], best_candidate[2]
@@ -975,30 +1237,55 @@ def solve_shift_routes(
             if not leg_durations_sec:
                 leg_durations_sec = [m * 60.0 for m in road_info.get("leg_durations_min", [])]
             leg_distances = road_info["leg_distances_km"]
-            drive_time_sec = float(sum(leg_durations_sec))
-            drive_time_min = round(drive_time_sec / 60.0, 1)
 
             route_dwells_sec = [_stop_dwell_seconds(node_idx, nodes) for node_idx in route_stops]
-            route_duration_sec = drive_time_sec + sum(route_dwells_sec)
-            route_duration_min = round(route_duration_sec / 60.0, 1)
+            total_dwell_sec = sum(route_dwells_sec)
 
-            # Assertion test: verify solver time == validator time (+-30s)
-            seq = list(route_stops)
-            solver_travel_sec = sum(time_matrix[a][b] for a, b in zip(seq, seq[1:])) + time_matrix[seq[-1]][plant_node]
-            solver_duration_sec = solver_travel_sec + sum(route_dwells_sec)
-            duration_gap_sec = abs(solver_duration_sec - route_duration_sec)
-            print(f"[Validation] Bus {buses_used}: Solver={solver_duration_sec:.1f}s, OSRM={route_duration_sec:.1f}s, Gap={duration_gap_sec:.1f}s")
-            # Verify solver time aligns with validator time
-            print(f"[Verified] Bus {buses_used}: Solver={solver_duration_sec:.0f}s, Validator={route_duration_sec:.0f}s, Gap={duration_gap_sec:.1f}s")
+            # Leg-by-leg diagnostic: table_sec vs route_api_sec
+            route_legs = list(zip(route_stops, route_stops[1:] + [plant_node]))
+            print(f"\n--- Bus {buses_used} Leg Diagnostic ({len(route_stops)} stops) ---")
+            for leg_idx, (u, v) in enumerate(route_legs):
+                u_name = nodes[u]["name"]
+                v_name = nodes[v]["name"]
+                t_sec = float(time_matrix[u][v])
+                r_sec = float(leg_durations_sec[leg_idx]) if leg_idx < len(leg_durations_sec) else t_sec
+                diff_sec = r_sec - t_sec
+                print(f"  [Leg Diag] Leg {leg_idx + 1}: '{u_name}' -> '{v_name}': table={t_sec:.1f}s, route_api={r_sec:.1f}s, diff={diff_sec:+.1f}s")
 
-            if route_duration_sec > MAX_RIDE_TIME_SEC + 10:
+            # Solver duration from Table matrix
+            solver_travel_sec = sum(time_matrix[a][b] for a, b in zip(route_stops, route_stops[1:])) + time_matrix[route_stops[-1]][plant_node]
+            solver_duration_sec = float(solver_travel_sec + total_dwell_sec)
+
+            # Route API duration
+            route_api_drive_sec = float(sum(leg_durations_sec))
+            route_api_duration_sec = float(route_api_drive_sec + total_dwell_sec)
+
+            # Authority duration according to FEASIBILITY_SOURCE
+            route_duration_sec_val, drive_time_sec, _ = route_duration_sec(
+                route_stops, nodes, time_matrix, plant_node, facility
+            )
+            route_duration_min = round(route_duration_sec_val / 60.0, 1)
+            drive_time_min = round(drive_time_sec / 60.0, 1)
+
+            duration_gap_sec = abs(solver_duration_sec - route_api_duration_sec)
+            print(f"  [Route Diag] Bus {buses_used}: Solver/Table={solver_duration_sec:.1f}s, Route API={route_api_duration_sec:.1f}s, Gap={duration_gap_sec:.1f}s")
+
+            if route_duration_sec_val > MAX_RIDE_TIME_SEC + 10:
                 raise RuntimeError(
-                    f"A mapped route exceeded the {MAX_RIDE_TIME_MIN:g}-minute limit ({MAX_RIDE_TIME_SEC}s) after repair: {route_duration_sec:.1f}s; no plan was published."
+                    f"A mapped route exceeded the {MAX_RIDE_TIME_MIN:g}-minute limit ({MAX_RIDE_TIME_SEC}s) after repair: {route_duration_sec_val:.1f}s; no plan was published."
                 )
 
+            # Schedule stops using the single authority source
             detailed_stops = []
             for stop_idx, node_idx in enumerate(route_stops):
-                remaining_sec = sum(leg_durations_sec[stop_idx:]) + sum(route_dwells_sec[stop_idx:])
+                if FEASIBILITY_SOURCE == "table":
+                    rem_travel_sec = sum(
+                        time_matrix[route_stops[i]][route_stops[i + 1]]
+                        for i in range(stop_idx, len(route_stops) - 1)
+                    ) + time_matrix[route_stops[-1]][plant_node]
+                else:
+                    rem_travel_sec = sum(leg_durations_sec[stop_idx:])
+                remaining_sec = rem_travel_sec + sum(route_dwells_sec[stop_idx:])
                 pickup_minute_of_day = (deadline_min * 60.0 - remaining_sec) / 60.0
                 p_min = int(round(pickup_minute_of_day))
                 p_hour = (p_min // 60) % 24
@@ -1015,7 +1302,7 @@ def solve_shift_routes(
                     "employees": nodes[node_idx]["employees"],
                 })
 
-            # Invariant check: first_pickup_time >= shift_start - 70 min
+            # Invariant check: first_pickup_time >= shift_start - PICKUP_WINDOW_HARD
             shift_start_min = deadline_min + ARRIVAL_BUFFER_MIN
             first_pickup_min = detailed_stops[0]["pickup_minute_of_day"]
             pickup_window_min = shift_start_min - first_pickup_min
@@ -1038,17 +1325,20 @@ def solve_shift_routes(
                 "occupancy_pct": round((route_demand / BUS_CAPACITY) * 100.0, 1),
                 "total_distance_km": round(route_dist_km, 1),
                 "route_duration_min": route_duration_min,
-                "route_duration_sec": round(route_duration_sec, 1),
+                "route_duration_sec": round(route_duration_sec_val, 1),
                 "solver_duration_sec": round(solver_duration_sec, 1),
+                "table_duration_sec": round(solver_duration_sec, 1),
+                "route_api_duration_sec": round(route_api_duration_sec, 1),
+                "duration_gap_sec": round(duration_gap_sec, 1),
                 "drive_time_min": drive_time_min,
                 "drive_time_sec": round(drive_time_sec, 1),
-                "duration_source": "OSRM road estimate plus configured stop dwell in seconds",
+                "duration_source": f"FEASIBILITY_SOURCE={FEASIBILITY_SOURCE} plus configured stop dwell in seconds",
                 "leg_distances_km": leg_distances,
                 "first_pickup_time": detailed_stops[0]["scheduled_time"],
                 "plant_arrival_time": cfg["display_deadline"],
                 "road_geometry": actual_geometry,
                 "ride_time_status": (
-                    "ON_TARGET" if route_duration_sec <= TARGET_RIDE_TIME_SEC else "WITHIN_ALLOWANCE"
+                    "ON_TARGET" if route_duration_sec_val <= TARGET_RIDE_TIME_SEC else "WITHIN_ALLOWANCE"
                 ),
                 "stops": detailed_stops,
             })
@@ -1067,11 +1357,15 @@ def solve_shift_routes(
             for emp in stop["employees"]:
                 outliers.append({**emp, "reason": "No feasible mapped-road route was found for this shift."})
 
+    # Save winning plan to plan history
+    save_stored_plan(plan_signature, shift, routes_output, total_shift_km)
+
     avg_occupancy = round((assigned_passengers / (buses_used * BUS_CAPACITY) * 100.0), 1) if buses_used > 0 else 0.0
     longest_ride = max([r["route_duration_min"] for r in routes_output], default=0.0)
 
     return {
         "shift": shift,
+        "plan_signature": plan_signature,
         "shift_start": cfg["in_time"],
         "plant_deadline": cfg["display_deadline"],
         "total_employees_in_roster": len(employees),

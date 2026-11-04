@@ -25,11 +25,9 @@ for directory in (CACHE_DIR, SEED_DIR, OUTPUT_DIR):
 
 
 class FacilityConfig(BaseModel):
-    # Destination coordinates are always supplied by the supervisor's
-    # confirmed selection, never from a global default.
-    name: str = ""
-    lat: float | None = None
-    lon: float | None = None
+    name: str = os.getenv("FACILITY_NAME", "Drop-off Facility")
+    lat: float | None = float(os.getenv("FACILITY_LAT")) if os.getenv("FACILITY_LAT") else None
+    lon: float | None = float(os.getenv("FACILITY_LON")) if os.getenv("FACILITY_LON") else None
     max_service_radius_km: float = float(os.getenv("MAX_SERVICE_RADIUS_KM", "50"))
 
 
@@ -140,6 +138,14 @@ class AppConfig:
     )
     KM_WEIGHT: float = float(os.getenv("KM_WEIGHT", "0.05"))
     PICKUP_MERGE_RADIUS_METERS: float = float(os.getenv("PICKUP_MERGE_RADIUS_METERS", "400"))
+
+    # Route Feasibility, Timing and Regression Controls
+    ROUTE_TIME_TOLERANCE_SEC: float = float(os.getenv("ROUTE_TIME_TOLERANCE_SEC", "60.0"))
+    OSRM_ROUTE_CONTINUE_STRAIGHT: str = os.getenv("OSRM_ROUTE_CONTINUE_STRAIGHT", "false").strip().lower()
+    FEASIBILITY_SOURCE: str = os.getenv("FEASIBILITY_SOURCE", "table").strip().lower()
+    PLAN_HISTORY_DIR: Path = Path(os.getenv("PLAN_HISTORY_DIR", str(DATA_DIR / "plan_history")))
+    PLAN_HISTORY_DIR.mkdir(parents=True, exist_ok=True)
+    KM_REGRESSION_TOLERANCE_PCT: float = float(os.getenv("KM_REGRESSION_TOLERANCE_PCT", "5.0"))
 
     # File Paths
     MASTER_STOPS_FILE: Path = SEED_DIR / "stops_seed.json"
