@@ -5,8 +5,9 @@ All configuration is read dynamically from config / .env.
 """
 
 import sys
+import argparse
 from pathlib import Path
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 import pandas as pd
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -22,6 +23,7 @@ from run_route_planner import (
     MAX_RIDE_TIME_MIN,
     ROUTE_TIME_TOLERANCE_SEC,
     FEASIBILITY_SOURCE,
+    PLAN_HISTORY_MODE,
 )
 
 
@@ -34,13 +36,14 @@ def get_facility() -> Dict[str, Any]:
     return {"name": name, "lat": float(lat), "lon": float(lon)}
 
 
-def run_all_shifts_report(roster_path: Path):
+def run_all_shifts_report(roster_path: Path, history_mode: str = "ignore"):
     print("=" * 85)
     print("AUTOROSTER ALL-SHIFTS EXECUTION & COMPREHENSIVE METRICS REPORT")
     print(f"Roster File: {roster_path.name}")
     facility = get_facility()
     print(f"Drop-off Facility: {facility['name']} ({facility['lat']:.6f}, {facility['lon']:.6f})")
     print(f"Parameters: BUS_CAPACITY={BUS_CAPACITY}, MAX_RIDE_TIME={MAX_RIDE_TIME_MIN:g}m ({MAX_RIDE_TIME_SEC}s), FEASIBILITY_SOURCE={FEASIBILITY_SOURCE}")
+    print(f"PLAN_HISTORY_MODE: {history_mode}")
     print("=" * 85)
 
     stop_lookup = load_all_verified_stops()
@@ -80,8 +83,8 @@ def run_all_shifts_report(roster_path: Path):
         if not shift_emps:
             continue
 
-        print(f"\n{'#' * 30} SOLVING SHIFT {shift} ({len(shift_emps)} employees) {'#' * 30}")
-        res = solve_shift_routes(shift, shift_emps, stop_lookup, facility)
+        print(f"\n{'#' * 30} SOLVING SHIFT {shift} ({len(shift_emps)} employees, history_mode={history_mode}) {'#' * 30}")
+        res = solve_shift_routes(shift, shift_emps, stop_lookup, facility, plan_history_mode=history_mode)
 
         routes = res.get("routes", [])
         num_buses = res.get("buses_used", 0)
@@ -121,10 +124,19 @@ def run_all_shifts_report(roster_path: Path):
 
 
 if __name__ == "__main__":
-    fixtures_dir = PROJECT_ROOT / "tests" / "fixtures"
-    fixture_files = list(fixtures_dir.glob("*.xlsx")) + list(fixtures_dir.glob("*.xls"))
-    if not fixture_files:
-        print(f"No fixtures found in {fixtures_dir}")
-        sys.exit(1)
-    run_all_shifts_report(fixture_files[0])
+    parser = argparse.ArgumentParser(description="Multi-shift report across all shifts.")
+    parser.add_argument("--history-mode", choices=["use", "ignore", "rebuild"], default="ignore", help="History mode")
+    parser.add_argument("--roster", type=Path, default=None, help="Roster Excel file")
+    args = parser.parse_args()
 
+    roster_file = args.roster
+    if not roster_file:
+        fixtures_dir = PROJECT_ROOT / "tests" / "fixtures"
+        fixture_files = list(fixtures_dir.glob("*.xlsx")) + list(fixtures_dir.glob("*.xls"))
+        if fixture_files:
+            roster_file = fixture_files[0]
+        else:
+            print(f"No fixtures found in {fixtures_dir}")
+            sys.exit(1)
+
+    run_all_shifts_report(roster_file, history_mode=args.history_mode)

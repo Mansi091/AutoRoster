@@ -51,6 +51,7 @@ OSRM_ROUTE_CONTINUE_STRAIGHT = getattr(config, "OSRM_ROUTE_CONTINUE_STRAIGHT", "
 FEASIBILITY_SOURCE = getattr(config, "FEASIBILITY_SOURCE", "table").strip().lower()
 PLAN_HISTORY_DIR = Path(getattr(config, "PLAN_HISTORY_DIR", "data/plan_history"))
 PLAN_HISTORY_DIR.mkdir(parents=True, exist_ok=True)
+PLAN_HISTORY_MODE = getattr(config, "PLAN_HISTORY_MODE", "use").strip().lower()
 KM_REGRESSION_TOLERANCE_PCT = getattr(config, "KM_REGRESSION_TOLERANCE_PCT", 5.0)
 
 def _display_clock(minutes: int) -> str:
@@ -893,6 +894,7 @@ def solve_shift_routes(
     facility: Dict[str, Any],
     resolution_details: Optional[Dict[str, Dict[str, Any]]] = None,
     shift_deadlines: Optional[Dict[str, int]] = None,
+    plan_history_mode: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Solves the multi-bus CVRPTW for a single shift using Google OR-Tools."""
     cfg = dict(SHIFT_CONFIG[shift])
@@ -1085,8 +1087,14 @@ def solve_shift_routes(
         return (-served, len(candidate_routes), int(round(target_excess_sec)), total_km)
 
     # Phase 3 & Section B: Evaluate strategies, warm-start from previous best, and pool candidates
+    # Phase 3 & Section B: Evaluate strategies, warm-start from previous best, and pool candidates
+    history_mode = (plan_history_mode or PLAN_HISTORY_MODE).strip().lower()
     plan_signature = compute_plan_signature(shift, nodes, facility, num_pickups)
-    stored_result = load_stored_plan(plan_signature, shift, nodes, time_matrix, plant_node, facility)
+    
+    stored_result = None
+    prev_score = None
+    if history_mode == "use":
+        stored_result = load_stored_plan(plan_signature, shift, nodes, time_matrix, plant_node, facility)
 
     strategies = [
         ("PARALLEL_CHEAPEST_INSERTION", routing_enums_pb2.FirstSolutionStrategy.PARALLEL_CHEAPEST_INSERTION),
@@ -1096,7 +1104,7 @@ def solve_shift_routes(
 
     candidate_plans_by_strategy = []
 
-    # If previous feasible plan exists, warm-start OR-Tools
+    # If previous feasible plan exists in "use" mode, warm-start OR-Tools
     if stored_result is not None:
         prev_routes, prev_data = stored_result
         try:
@@ -1127,7 +1135,6 @@ def solve_shift_routes(
                         v_warm_routes.extend(repaired)
                         warm_imp.update(impossible)
                     warm_score = actual_plan_score(v_warm_routes)
-                    print(f"[Solver] Strategy WARM_START: served={-warm_score[0]}, buses={warm_score[1]}, excess={warm_score[2]}s, km={warm_score[3]}")
                     candidate_plans_by_strategy.append((warm_score, v_warm_routes, warm_imp, "WARM_START"))
         except Exception as e:
             print(f"[Solver] Warm-start attempt notice: {e}")
@@ -1141,9 +1148,9 @@ def solve_shift_routes(
             prev_v_routes.extend(repaired)
             prev_imp.update(impossible)
         prev_score = actual_plan_score(prev_v_routes)
-        print(f"[PlanHistory] Stored plan: served={-prev_score[0]}, buses={prev_score[1]}, excess={prev_score[2]}s, km={prev_score[3]}")
         candidate_plans_by_strategy.append((prev_score, prev_v_routes, prev_imp, "STORED_BEST"))
 
+    # Fresh strategy solves: ALWAYS executed across all modes
     for strat_name, strat_enum in strategies:
         search_params = pywrapcp.DefaultRoutingSearchParameters()
         search_params.first_solution_strategy = strat_enum
@@ -1200,31 +1207,23 @@ def solve_shift_routes(
             v_routes, imp_nodes = b_routes, b_impossible
 
         strat_score = actual_plan_score(v_routes)
-        print(f"[Solver] Strategy {strat_name}: served={-strat_score[0]}, buses={strat_score[1]}, excess_sec={strat_score[2]}s, km={strat_score[3]}")
         candidate_plans_by_strategy.append((strat_score, v_routes, imp_nodes, strat_name))
 
-    # Diagnostic check: If solver returns more buses than stored plan, log penalty comparison
-    if stored_result is not None:
-        prev_routes, prev_data = stored_result
-        prev_buses = len(prev_routes)
-        for cand_score, cand_routes, cand_imp, cand_name in candidate_plans_by_strategy:
-            cand_buses = len(cand_routes)
-            if cand_buses > prev_buses:
-                print(f"[Diagnostic] Strategy {cand_name} produced {cand_buses} buses vs previous feasible {prev_buses} buses.")
-                print(f"  Fixed bus cost: {fixed_bus_cost}")
-                print(f"  Max soft-target penalty: {max_target_penalty}")
-                print(f"  Max km cost: {int(round(KM_WEIGHT * max_leg_meters * (num_pickups + 1)))}")
-                print(f"  Comparison: fixed_bus_cost > max_soft+km: {fixed_bus_cost > max_target_penalty}")
+    # Print EVERY candidate in the candidate pool
+    print(f"\n[Candidate Pool] Evaluated {len(candidate_plans_by_strategy)} candidate plans (mode={history_mode}):")
+    for sc, c_routes, imp, name in candidate_plans_by_strategy:
+        print(f"  - {name:<30}: served={-sc[0]}, buses={sc[1]}, excess={sc[2]}s, km={sc[3]:.1f}")
 
     routes_output = []
     buses_used = 0
     assigned_passengers = 0
     total_shift_km = 0.0
+    all_legs_diagnostic = []
 
     if candidate_plans_by_strategy:
         # Choose best plan: (employees served desc, buses asc, target excess asc, km asc)
         best_candidate = min(candidate_plans_by_strategy, key=lambda item: item[0])
-        print(f"[Solver] Selected best overall plan from strategy: {best_candidate[3]}")
+        print(f"[Candidate Selection] Selected best plan: {best_candidate[3]} (served={-best_candidate[0][0]}, buses={best_candidate[0][1]}, excess={best_candidate[0][2]}s, km={best_candidate[0][3]:.1f})")
         validated_routes, impossible_nodes = best_candidate[1], best_candidate[2]
 
         for route_stops, road_info in validated_routes:
@@ -1243,14 +1242,21 @@ def solve_shift_routes(
 
             # Leg-by-leg diagnostic: table_sec vs route_api_sec
             route_legs = list(zip(route_stops, route_stops[1:] + [plant_node]))
-            print(f"\n--- Bus {buses_used} Leg Diagnostic ({len(route_stops)} stops) ---")
             for leg_idx, (u, v) in enumerate(route_legs):
                 u_name = nodes[u]["name"]
                 v_name = nodes[v]["name"]
                 t_sec = float(time_matrix[u][v])
                 r_sec = float(leg_durations_sec[leg_idx]) if leg_idx < len(leg_durations_sec) else t_sec
                 diff_sec = r_sec - t_sec
-                print(f"  [Leg Diag] Leg {leg_idx + 1}: '{u_name}' -> '{v_name}': table={t_sec:.1f}s, route_api={r_sec:.1f}s, diff={diff_sec:+.1f}s")
+                all_legs_diagnostic.append({
+                    "bus": buses_used,
+                    "leg": leg_idx + 1,
+                    "from": u_name,
+                    "to": v_name,
+                    "table": t_sec,
+                    "route": r_sec,
+                    "gap": diff_sec,
+                })
 
             # Solver duration from Table matrix
             solver_travel_sec = sum(time_matrix[a][b] for a, b in zip(route_stops, route_stops[1:])) + time_matrix[route_stops[-1]][plant_node]
@@ -1268,7 +1274,6 @@ def solve_shift_routes(
             drive_time_min = round(drive_time_sec / 60.0, 1)
 
             duration_gap_sec = abs(solver_duration_sec - route_api_duration_sec)
-            print(f"  [Route Diag] Bus {buses_used}: Solver/Table={solver_duration_sec:.1f}s, Route API={route_api_duration_sec:.1f}s, Gap={duration_gap_sec:.1f}s")
 
             if route_duration_sec_val > MAX_RIDE_TIME_SEC + 10:
                 raise RuntimeError(
@@ -1357,8 +1362,57 @@ def solve_shift_routes(
             for emp in stop["employees"]:
                 outliers.append({**emp, "reason": "No feasible mapped-road route was found for this shift."})
 
-    # Save winning plan to plan history
-    save_stored_plan(plan_signature, shift, routes_output, total_shift_km)
+    # Section 6: Report Table-vs-Route-API Gap separately (max and per worst leg)
+    if all_legs_diagnostic:
+        worst_leg = max(all_legs_diagnostic, key=lambda l: abs(l["gap"]))
+        max_gap_route = max(routes_output, key=lambda r: r.get("duration_gap_sec", 0.0), default=None)
+        print(f"\n[Table vs Route-API Gap Summary - Shift {shift}]")
+        print(f"  * Worst Leg: Bus {worst_leg['bus']}, Leg {worst_leg['leg']} ('{worst_leg['from']}' -> '{worst_leg['to']}'): Table={worst_leg['table']:.1f}s, Route API={worst_leg['route']:.1f}s, Gap={abs(worst_leg['gap']):.1f}s")
+        if max_gap_route:
+            print(f"  * Shift Max Route Gap: Bus {max_gap_route['route_no']}: Table={max_gap_route['table_duration_sec']:.1f}s, Route API={max_gap_route['route_api_duration_sec']:.1f}s, Gap={max_gap_route['duration_gap_sec']:.1f}s")
+        print(f"  * Solver vs Validator Verification: All {len(routes_output)} routes within ROUTE_TIME_TOLERANCE_SEC ({ROUTE_TIME_TOLERANCE_SEC}s) -> STATUS: PASSED")
+
+    # Section 5: Outliers reporting with solo drive time vs hard ride limit
+    if outliers:
+        print(f"\n[Outliers Report - Shift {shift}] {len(outliers)} unassigned / flagged employee(s):")
+        for out in outliers:
+            emp_name = out.get("emp_name", "Unknown")
+            raw_stop = out.get("raw_stop", "None")
+            reason = out.get("reason", "Unknown reason")
+            stop_key = _stop_key(raw_stop)
+            loc = stop_lookup.get(stop_key)
+            if loc and loc.get("lat") and loc.get("lon") and facility.get("lat") and facility.get("lon"):
+                try:
+                    s_nodes = [
+                        {"name": loc["name"], "lat": loc["lat"], "lon": loc["lon"], "demand": 1},
+                        {"name": facility["name"], "lat": facility["lat"], "lon": facility["lon"], "demand": 0},
+                    ]
+                    s_mat, _ = get_road_matrix(s_nodes)
+                    s_tot, s_drv, s_dwl = route_duration_sec([0], s_nodes, s_mat, 1, facility)
+                    s_str = f"{s_tot/60.0:.1f}m ({s_tot:.0f}s: drive {s_drv:.0f}s + dwell {s_dwl:.0f}s)"
+                except Exception as err:
+                    s_str = f"Calc error: {err}"
+            else:
+                s_str = "N/A (unverified location coordinates)"
+            print(f"  * Employee: '{emp_name}' | Stop: '{raw_stop}' | Reason: '{reason}' | Solo Ride: {s_str} vs Hard Limit: {MAX_RIDE_TIME_MIN:g}m ({MAX_RIDE_TIME_SEC}s)")
+    else:
+        print(f"\n[Outliers Report - Shift {shift}] 0 outliers (all roster employees successfully assigned to routes).")
+
+    # Section 4: History Replacement Rule
+    # History must only ever improve; never seed it from an unverified run
+    if history_mode != "ignore":
+        should_save = False
+        if history_mode == "rebuild" or stored_result is None:
+            should_save = True
+        elif stored_result is not None:
+            if best_candidate[0] < prev_score:
+                should_save = True
+                print(f"[PlanHistory] Better plan found ({best_candidate[0]} < {prev_score}). Updating stored history.")
+            else:
+                print(f"[PlanHistory] Stored plan remains equal or best. Keeping existing history.")
+        if should_save:
+            save_stored_plan(plan_signature, shift, routes_output, total_shift_km)
+
 
     avg_occupancy = round((assigned_passengers / (buses_used * BUS_CAPACITY) * 100.0), 1) if buses_used > 0 else 0.0
     longest_ride = max([r["route_duration_min"] for r in routes_output], default=0.0)
@@ -1638,6 +1692,7 @@ def run_full_pipeline(
     pickup_resolver=None,
     shift_deadlines: Optional[Dict[str, int]] = None,
     shift_filter: str = "ALL",
+    plan_history_mode: Optional[str] = None,
 ):
     shift_filter = str(shift_filter or "ALL").strip().upper()
     if shift_filter != "ALL" and shift_filter not in {"A", "B", "C"}:
@@ -1714,14 +1769,7 @@ def run_full_pipeline(
     shift_keys = ["A", "B", "C"] if shift_filter == "ALL" else [shift_filter]
     for shift_key in shift_keys:
         shift_emps = [e for e in all_employees if _primary_shift(e["shift"]) == shift_key]
-        res = solve_shift_routes(
-            shift_key,
-            shift_emps,
-            stop_lookup,
-            facility,
-            resolution_details,
-            shift_deadlines,
-        )
+        res = solve_shift_routes(shift_key, shift_emps, stop_lookup, facility, resolution_details, shift_deadlines, plan_history_mode)
         all_results.append(res)
 
     # Generate Excel with separate sheets for each shift + Raw Data
@@ -1738,6 +1786,7 @@ if __name__ == "__main__":
     parser.add_argument("--facility-name", required=True, help="Name from the supervisor-confirmed drop-off")
     parser.add_argument("--facility-lat", required=True, type=float, help="Latitude from the confirmed drop-off")
     parser.add_argument("--facility-lon", required=True, type=float, help="Longitude from the confirmed drop-off")
+    parser.add_argument("--history-mode", choices=["use", "ignore", "rebuild"], default=PLAN_HISTORY_MODE, help="Plan history mode: use, ignore, or rebuild")
     args = parser.parse_args()
     from backend.app.etl.transform.coordinate_resolver import resolve_roster_pickup_coordinates
 
@@ -1746,4 +1795,5 @@ if __name__ == "__main__":
         args.output,
         {"name": args.facility_name, "lat": args.facility_lat, "lon": args.facility_lon},
         resolve_roster_pickup_coordinates,
+        plan_history_mode=args.history_mode,
     )

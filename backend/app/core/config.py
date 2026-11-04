@@ -145,6 +145,7 @@ class AppConfig:
     FEASIBILITY_SOURCE: str = os.getenv("FEASIBILITY_SOURCE", "table").strip().lower()
     PLAN_HISTORY_DIR: Path = Path(os.getenv("PLAN_HISTORY_DIR", str(DATA_DIR / "plan_history")))
     PLAN_HISTORY_DIR.mkdir(parents=True, exist_ok=True)
+    PLAN_HISTORY_MODE: str = os.getenv("PLAN_HISTORY_MODE", "use").strip().lower()
     KM_REGRESSION_TOLERANCE_PCT: float = float(os.getenv("KM_REGRESSION_TOLERANCE_PCT", "5.0"))
 
     # File Paths
