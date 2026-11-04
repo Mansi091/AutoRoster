@@ -1,12 +1,13 @@
 """Route stop sequencing and schedule construction."""
 
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Optional
 from ..utils.geo import haversine_km
 from ..core.config import config
 
 def build_route_schedule(
     raw_stops: List[Dict[str, Any]],
     destination_node: Dict[str, Any],
+    solver_duration: Optional[float] = None,
 ) -> Tuple[List[Dict[str, Any]], float, float]:
     """Computes stop-by-stop cumulative kilometers, passenger accumulations, and final duration.
 
@@ -51,7 +52,10 @@ def build_route_schedule(
     total_km = round(cum_km + final_leg_km, 1)
 
     # Total vehicle route duration with dwell time
-    total_road_km = total_km * config.COMMUTE.pune_road_curvature_factor
-    total_duration = round((total_road_km / config.COMMUTE.transit_speed_kmh) * 60.0 + len(scheduled) * config.COMMUTE.dwell_minutes_per_stop, 1)
+    if solver_duration is not None and float(solver_duration) > 0:
+        total_duration = round(float(solver_duration), 1)
+    else:
+        total_road_km = total_km * config.COMMUTE.pune_road_curvature_factor
+        total_duration = round((total_road_km / config.COMMUTE.transit_speed_kmh) * 60.0 + len(scheduled) * config.COMMUTE.dwell_minutes_per_stop, 1)
 
     return scheduled, total_km, total_duration

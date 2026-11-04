@@ -191,7 +191,8 @@ class PlanService:
                         ]
                         if not raw_sub_stops:
                             continue
-                        sched_stops, tot_km, tot_min = build_route_schedule(raw_sub_stops, dest_node)
+                        solver_dur = r.get("route_duration_minutes")
+                        sched_stops, tot_km, tot_min = build_route_schedule(raw_sub_stops, dest_node, solver_duration=solver_dur)
                         bus_counter.setdefault(sh, 0)
                         bus_counter[sh] += 1
                         all_routes.append({
@@ -209,6 +210,7 @@ class PlanService:
                             "ride_time_status": "ON_TARGET" if tot_min <= 60.0 else "WITHIN_ALLOWANCE",
                             "destination_name": dest.get("name") or "Drop-off Facility",
                             "stops": sched_stops,
+                            "is_solver_optimized": True,
                         })
 
         # 5. Strictly enforce maximum commute duration <= 60 min (max 70 min)

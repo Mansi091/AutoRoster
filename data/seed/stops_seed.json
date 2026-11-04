@@ -1096,8 +1096,8 @@
     73.712
   ],
   "Abhang Hospital": [
-    18.520149,
-    73.867025
+    18.718,
+    73.766
   ],
   "Adarsh nagar ravet": [
     18.661043,
@@ -1112,8 +1112,8 @@
     73.692
   ],
   "Bhandari Hospital Bus Stop Talegaon Dabhade": [
-    18.733711,
-    73.672859
+    18.7337,
+    73.6729
   ],
   "Bharat Mata chowk": [
     18.6677,
@@ -1124,8 +1124,8 @@
     73.6705
   ],
   "Bijalinagar Bridge Chinchwad": [
-    18.631581,
-    73.78546
+    18.6316,
+    73.7855
   ],
   "Chandrabhaga Corner, Ravet": [
     18.654,
@@ -1160,12 +1160,12 @@
     73.698
   ],
   "Eco City, Varale, Talegaon": [
-    18.735,
-    73.675
+    18.742,
+    73.698
   ],
   "Faralwadi, Vallabh Nagar, Pimpri": [
-    18.588914,
-    73.818405
+    18.627,
+    73.818
   ],
   "Gajanan Maharaj Mandir, Talegaon": [
     18.735,
@@ -1184,8 +1184,8 @@
     73.766
   ],
   "Idbi Bank": [
-    18.513321,
-    73.847918
+    18.736,
+    73.687
   ],
   "Imperial Hospital": [
     18.7305,
@@ -1204,8 +1204,8 @@
     73.682
   ],
   "Jijamata Chowk": [
-    18.721659,
-    73.684403
+    18.7217,
+    73.6844
   ],
   "Jijamata Chowk Talegaon Dabhade": [
     18.676433,
@@ -1216,12 +1216,12 @@
     73.801806
   ],
   "Kalewadi": [
-    18.60697,
-    73.783539
+    18.607,
+    73.7835
   ],
   "Karla, Lonavala": [
-    18.754856,
-    73.401673
+    18.7549,
+    73.4017
   ],
   "Katale Vasti, Near Sameer Lawans, Ravet": [
     18.654,
@@ -1236,12 +1236,12 @@
     73.642
   ],
   "Kharabwadi, Chakan": [
-    18.75754,
-    73.840459
+    18.7575,
+    73.8405
   ],
   "Khed Rajguru Nagar": [
-    18.852868,
-    73.884676
+    18.8529,
+    73.8847
   ],
   "Kushal swarali chakan": [
     18.762311,
@@ -1264,16 +1264,16 @@
     73.7582
   ],
   "Malinagar Vadgaon": [
-    18.711422,
-    73.76036
+    18.742,
+    73.645
   ],
   "Malwadi Talegaon": [
-    18.735561,
-    73.694108
+    18.7356,
+    73.6941
   ],
   "Manohar Nagar Gate": [
-    18.733439,
-    73.688853
+    18.7334,
+    73.6889
   ],
   "Maruti Mandir Chowk Talegaon Dabhade": [
     18.719994,
@@ -1284,12 +1284,12 @@
     73.639161
   ],
   "Moshi Chowk": [
-    18.681056,
-    73.858648
+    18.674,
+    73.847
   ],
   "Nakhatewasti": [
-    18.516453,
-    73.861763
+    18.605,
+    73.785
   ],
   "Namo Medical": [
     18.741,
@@ -1304,32 +1304,32 @@
     73.917082
   ],
   "New Sangvi, Krishna Chowk": [
-    18.59484,
-    73.759463
+    18.5948,
+    73.7595
   ],
   "Padalwadi, Rajgurunagar": [
-    18.855538,
-    73.886395
+    18.8555,
+    73.8864
   ],
   "Pimpoli, Kamshet": [
-    18.76292,
-    73.557647
+    18.7629,
+    73.5576
   ],
   "Punawale, Katewasti": [
     18.6383,
     73.7462
   ],
   "Ravet": [
-    18.643269,
-    73.745056
+    18.6433,
+    73.7451
   ],
   "Shastri Chowk": [
     18.621235,
     73.857607
   ],
   "Shivaji Chowk, Walhekarwadi": [
-    18.630077,
-    73.77489
+    18.632,
+    73.765
   ],
   "Shivsrushti, Gada Chowk Ambegaon": [
     18.456453,
@@ -1348,12 +1348,12 @@
     73.645
   ],
   "Vadgaon, Khandoba Mandir": [
-    18.569277,
-    73.765054
+    18.7435,
+    73.6475
   ],
   "Vadgaon, Matoshri Hospital": [
-    18.737552,
-    73.639161
+    18.7376,
+    73.6392
   ],
   "Vadgaon Phata, Talegaon Dabhade (Urse Toll Plaza)": [
     18.74033,
@@ -1364,8 +1364,8 @@
     73.738
   ],
   "Walhekarwadi": [
-    18.630077,
-    73.77489
+    18.6301,
+    73.7749
   ],
   "Xarbia, ambi": [
     18.728,
@@ -1374,5 +1374,445 @@
   "Ramvadi": [
     18.513576,
     73.850632
+  ],
+  "Abhang Hospital, Dehugaon": [
+    18.718,
+    73.766
+  ],
+  "Adarsh Nagar, Ravet": [
+    18.648,
+    73.742
+  ],
+  "Ambethan Chowk, Chakan": [
+    18.763,
+    73.8613
+  ],
+  "Ankul Chowk, Chakan": [
+    18.752,
+    73.858
+  ],
+  "Bhandari Hospital, Talegaon Dabhade": [
+    18.7337,
+    73.6729
+  ],
+  "Bharat Mata Chowk, Moshi": [
+    18.6677,
+    73.8504
+  ],
+  "Bharat Petrol Pump, Talegaon Station": [
+    18.7367,
+    73.6705
+  ],
+  "Bijalinagar Bridge, Chinchwad": [
+    18.6316,
+    73.7855
+  ],
+  "Chintamani Chowk, Bijali Nagar": [
+    18.644,
+    73.7696
+  ],
+  "Chintamani Chowk, Bijali Nagar, Chinchwad": [
+    18.644,
+    73.7696
+  ],
+  "Chourai, Parandwadi Road": [
+    18.708,
+    73.6592
+  ],
+  "D.Y. Patil College, Ambi, Talegaon": [
+    18.7369,
+    73.6877
+  ],
+  "Dehu Phata, Alandi": [
+    18.6709,
+    73.8915
+  ],
+  "Dehugaon, Vitthal Wadi, Rahul Marble": [
+    18.72,
+    73.766
+  ],
+  "Eco City, Varale Phata": [
+    18.749,
+    73.6966
+  ],
+  "Ganesh Nagar, Nigdi": [
+    18.6666,
+    73.7816
+  ],
+  "Glamoria, Front of Runal Gateway, Ravet": [
+    18.6433,
+    73.7451
+  ],
+  "HDFC ATM, Dehugaon": [
+    18.7208,
+    73.766
+  ],
+  "IDBI Bank, Talegaon Dabhade": [
+    18.736,
+    73.687
+  ],
+  "Imperial Hospital, Talegaon": [
+    18.7305,
+    73.675
+  ],
+  "Indrayani College, Talegaon": [
+    18.7422,
+    73.6804
+  ],
+  "Indrayani English School, Yashwant Nagar": [
+    18.7335,
+    73.682
+  ],
+  "Jijamata Chowk, Talegaon Dabhade": [
+    18.7217,
+    73.6844
+  ],
+  "Kadadhe, Pawana Nagar, Maval": [
+    18.6833,
+    73.5042
+  ],
+  "Katale Vasti, Near Sameer Lawns, Ravet": [
+    18.654,
+    73.742
+  ],
+  "Katvi Road, Talegaon": [
+    18.732,
+    73.665
+  ],
+  "Khed, Rajgurunagar": [
+    18.8529,
+    73.8847
+  ],
+  "Kushal Swarali, Chakan": [
+    18.7623,
+    73.8625
+  ],
+  "Lakshmi Chowk, Moshi": [
+    18.675,
+    73.845
+  ],
+  "Maitri Garden, Nigdi": [
+    18.6535,
+    73.7715
+  ],
+  "Majopa Mandir, Walhekarwadi": [
+    18.6382,
+    73.7582
+  ],
+  "Malinagar, Vadgaon Maval": [
+    18.742,
+    73.645
+  ],
+  "Malwadi, Talegaon": [
+    18.7356,
+    73.6941
+  ],
+  "Manohar Nagar Gate, Talegaon": [
+    18.7334,
+    73.6889
+  ],
+  "Maruti Mandir Chowk, Talegaon Dabhade": [
+    18.72,
+    73.6829
+  ],
+  "Matoshri Hospital, Vadgaon": [
+    18.7376,
+    73.6392
+  ],
+  "Nakhate Wasti, Rahatani": [
+    18.605,
+    73.785
+  ],
+  "Namo Medical, Talegaon": [
+    18.741,
+    73.678
+  ],
+  "Near D.Y. Patil College, Varale": [
+    18.738,
+    73.689
+  ],
+  "Nervale Vasti, Somatane": [
+    18.625,
+    73.712
+  ],
+  "Pawale Bridge, Nigdi": [
+    18.6517,
+    73.7634
+  ],
+  "Shastri Chowk, Bhosari": [
+    18.6225,
+    73.841
+  ],
+  "Shivsrushti, Gada Chowk, Ambegaon": [
+    18.4565,
+    73.838
+  ],
+  "Spine City Mall, Bhosari": [
+    18.642,
+    73.848
+  ],
+  "Tuljai Housing Society, Talegaon": [
+    18.735,
+    73.685
+  ],
+  "Vadgaon Maval": [
+    18.748,
+    73.645
+  ],
+  "Vadgaon Phata (Urse Toll Plaza)": [
+    18.7403,
+    73.6409
+  ],
+  "Vadgaon Phata, Talegaon Dabhade": [
+    18.7403,
+    73.6409
+  ],
+  "Varale Phata, Talegaon": [
+    18.735,
+    73.678
+  ],
+  "Vedant Khanaval, Chikhali, Dehu Road": [
+    18.672,
+    73.738
+  ],
+  "Xrbia, Ambi": [
+    18.728,
+    73.692
+  ],
+  "nan": [
+    18.7579575,
+    73.8332035
+  ],
+  "D Y Patil Ambi Talegaon": [
+    18.7369,
+    73.6877
+  ],
+  "Chourai Parandwadi Road": [
+    18.708,
+    73.6592
+  ],
+  "Vadgaon Matroshri Hospital": [
+    18.7376,
+    73.6392
+  ],
+  "Vadgaon Phata Talegaon Dabhde ( Urse Toll Plaza)": [
+    18.7403,
+    73.6409
+  ],
+  "Gajanan Maharaj Mandir Talegaon": [
+    18.735,
+    73.675
+  ],
+  "Shivaji Chauk Walhekarwadi": [
+    18.632,
+    73.765
+  ],
+  "Bharat Mata Chowk": [
+    18.6677,
+    73.8504
+  ],
+  "Padalwadi Rajgurunagar": [
+    18.8555,
+    73.8864
+  ],
+  "Ambethan Chowk Chakan": [
+    18.763,
+    73.8613
+  ],
+  "Faralwadi Wallabh Nagar Pimpari": [
+    18.627,
+    73.818
+  ],
+  "Katvi Road Talegaon": [
+    18.732,
+    73.665
+  ],
+  "Bharat Mata Chowk Moshi": [
+    18.6677,
+    73.8504
+  ],
+  "Pimpoli Kamshet": [
+    18.7629,
+    73.5576
+  ],
+  "Vadgav Khandoba Mandir": [
+    18.7435,
+    73.6475
+  ],
+  "Shivsrushti Gada Chauk Ambegaon": [
+    18.4565,
+    73.838
+  ],
+  "Shastri Showk": [
+    18.6225,
+    73.841
+  ],
+  "Nervale Vasti": [
+    18.625,
+    73.712
+  ],
+  "Indrayani English School Yashwant Nagar": [
+    18.7335,
+    73.682
+  ],
+  "Ganesh Nagar Nigadi": [
+    18.6666,
+    73.7816
+  ],
+  "Vedant Khanaval Chikhali Dehuroad": [
+    18.672,
+    73.738
+  ],
+  "Lakshmi Chowk Mosi": [
+    18.675,
+    73.845
+  ],
+  "Dehugaon Vitthal Wadi Rahul Marbal": [
+    18.72,
+    73.766
+  ],
+  "Manohar Nagar Talegaon": [
+    18.7335,
+    73.6842
+  ],
+  "Glamoria Front Of Runal Gateway Ravet": [
+    18.6433,
+    73.7451
+  ],
+  "Kadadhe Pawana Nagar": [
+    18.6833,
+    73.5042
+  ],
+  "Ecocity Varale Phata": [
+    18.742,
+    73.698
+  ],
+  "Jijamata Chauk Talegaonndabhade": [
+    18.7217,
+    73.6844
+  ],
+  "New Sangvi Krishna Chowk": [
+    18.5948,
+    73.7595
+  ],
+  "Ecosity": [
+    18.742,
+    73.698
+  ],
+  "Spine City Mall Bhosari": [
+    18.642,
+    73.848
+  ],
+  "Karla Lonavala": [
+    18.7549,
+    73.4017
+  ],
+  "Chintamani Chauk Bijalinagar": [
+    18.644,
+    73.7696
+  ],
+  "Maruti Mandir Chauk Talegaon Dabhade": [
+    18.72,
+    73.6829
+  ],
+  "Kharabwadi Chakan": [
+    18.7575,
+    73.8405
+  ],
+  "Dehu Phata": [
+    18.6709,
+    73.8915
+  ],
+  "Chandrabhaga Corner Ravet": [
+    18.654,
+    73.742
+  ],
+  "Indrayani Collage Talegaon": [
+    18.7422,
+    73.6804
+  ],
+  "Punawale Katewasti": [
+    18.6383,
+    73.7462
+  ],
+  "Nan": [
+    18.7579575,
+    73.8332035
+  ],
+  "Xarbia Ambi": [
+    18.728,
+    73.692
+  ],
+  "Keshavnagar Vadgaon": [
+    18.745,
+    73.642
+  ],
+  "Majopa Mandir Welhekarwadi": [
+    18.6382,
+    73.7582
+  ],
+  "Kushal Swarali Chakan": [
+    18.7623,
+    73.8625
+  ],
+  "Lonavala Malvali": [
+    18.751,
+    73.475
+  ],
+  "Chintamani Nchauk Bijali Nagar Chinchwad": [
+    18.644,
+    73.7696
+  ],
+  "Tuljai Housing Society": [
+    18.735,
+    73.685
+  ],
+  "Katale Vasti Near Sameer Lawans Ravet": [
+    18.654,
+    73.742
+  ],
+  "Indori Talegaon": [
+    18.747,
+    73.708
+  ],
+  "Maitri Gardan Nigdi": [
+    18.6535,
+    73.7715
+  ],
+  "Near Dy Patil Collage Varale": [
+    18.738,
+    73.689
+  ],
+  "Ankul Chowk": [
+    18.752,
+    73.858
+  ],
+  "Matoshri Hospital Vadgaon": [
+    18.7376,
+    73.6392
+  ],
+  "Bharat Petrol Pump Talegaon Station": [
+    18.7367,
+    73.6705
+  ],
+  "Hdfc Atm Dehugaon": [
+    18.7208,
+    73.766
+  ],
+  "Vadgaon Phata Talegaon Dabhde": [
+    18.7403,
+    73.6409
+  ],
+  "Eco City Varale Talegaon": [
+    18.742,
+    73.698
+  ],
+  "Moshi Chouk": [
+    18.674,
+    73.847
+  ],
+  "Adharsh Nagar Ravet": [
+    18.648,
+    73.742
   ]
 }

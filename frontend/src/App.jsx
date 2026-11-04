@@ -1,5 +1,6 @@
 import React, { useState, useMemo, useRef, useEffect } from "react";
 import { useAuth, useUser } from "@clerk/react";
+import lvShindeLogo from "./assets/lv_shinde_group_logo.png";
 import {
   Bus,
   Upload,
@@ -190,7 +191,7 @@ export default function App() {
   const [shiftFilter, setShiftFilter] = useState("ALL");
   const [corridorFilter, setCorridorFilter] = useState("ALL");
   const [searchQuery, setSearchQuery] = useState("");
-  const [shiftStartTimes, setShiftStartTimes] = useState({});
+  const [shiftStartTimes, setShiftStartTimes] = useState({ A: "06:50", B: "14:50", C: "22:50" });
   const [selectedTimeShift, setSelectedTimeShift] = useState("ALL");
   const [plannedRosterFile, setPlannedRosterFile] = useState(null);
   const [plannedShiftStartTimes, setPlannedShiftStartTimes] = useState(null);
@@ -241,7 +242,7 @@ export default function App() {
       setClustering(null);
       setUploadedRosterFile(null);
       setPlannedRosterFile(null);
-      setSelectedTimeShift("");
+      setSelectedTimeShift("ALL");
       setDestination(null);
       setConfirmedDropoff(null);
       setShowVerifyModal(false);
@@ -263,7 +264,7 @@ export default function App() {
   useEffect(() => {
     if (!isLoaded || !isSignedIn) {
       setShiftStartTimes({});
-      setSelectedTimeShift("");
+      setSelectedTimeShift("ALL");
       setPlannedShiftStartTimes(null);
       setArrivalBufferMinutes(null);
       return undefined;
@@ -309,7 +310,7 @@ export default function App() {
     // picker is closed without confirming a replacement, planning stays blocked.
     setDestination(null);
     setConfirmedDropoff(null);
-    setSelectedTimeShift("");
+    setSelectedTimeShift("ALL");
     setDropoffCandidates([]);
     setDropoffSearchText("");
     setShowDropoffModal(true);
@@ -344,16 +345,16 @@ export default function App() {
       setShowDropoffModal(true);
       return;
     }
-    if (!Object.keys(shiftStartTimes).length) {
-      setStatusMessage("Error: Shift options are unavailable. Please reload and try again.");
-      return;
-    }
-    if (!selectedTimeShift) {
-      setStatusMessage("Error: Select a shift before building routes.");
-      return;
-    }
-    if (Object.values(shiftStartTimes).some((time) => !/^([01]\d|2[0-3]):[0-5]\d$/.test(time || ""))) {
-      setStatusMessage("Error: Enter a valid start time for every shift before planning.");
+    const effectiveShift = selectedTimeShift || "ALL";
+    const currentShiftTimes = {
+      A: shiftStartTimes.A || "06:50",
+      B: shiftStartTimes.B || "14:50",
+      C: shiftStartTimes.C || "22:50",
+      ...shiftStartTimes,
+    };
+    const requiredShifts = effectiveShift === "ALL" ? ["A", "B", "C"] : [effectiveShift];
+    if (requiredShifts.some((s) => !/^([01]\d|2[0-3]):[0-5]\d$/.test(currentShiftTimes[s] || ""))) {
+      setStatusMessage("Error: Enter a valid 24-hour start time (HH:MM) for every selected shift before planning.");
       return;
     }
     const planningUserId = currentUser?.id;
@@ -373,8 +374,8 @@ export default function App() {
         lat: facility.lat,
         lon: facility.lon,
       }));
-      formData.append("shift_filter", selectedTimeShift || "ALL");
-      formData.append("shift_start_times", JSON.stringify(shiftStartTimes));
+      formData.append("shift_filter", effectiveShift);
+      formData.append("shift_start_times", JSON.stringify(currentShiftTimes));
       const res = await authenticatedFetch("/api/plan_multi_shift", {
         method: "POST",
         body: formData,
@@ -847,10 +848,10 @@ export default function App() {
     : 0;
   const hasPendingRoster = Boolean(uploadedRosterFile && uploadedRosterFile !== plannedRosterFile);
   const effectiveShiftChoice = selectedTimeShift || "ALL";
+  const requiredShifts = effectiveShiftChoice === "ALL" ? ["A", "B", "C"] : [effectiveShiftChoice];
   const canBuildRoutes = Boolean(
     hasPendingRoster && destination && effectiveShiftChoice &&
-    Object.keys(shiftStartTimes).length > 0 &&
-    Object.values(shiftStartTimes).every((time) => /^([01]\d|2[0-3]):[0-5]\d$/.test(time || "")) &&
+    requiredShifts.every((s) => /^([01]\d|2[0-3]):[0-5]\d$/.test(shiftStartTimes[s] || (s === "A" ? "06:50" : s === "B" ? "14:50" : "22:50"))) &&
     !isOptimising
   );
 
@@ -915,7 +916,7 @@ export default function App() {
   const pageMeta = activeTab === "history"
     ? { title: "Roster history", sub: "Plans you have saved, ready to download again." }
     : !clustering
-      ? { title: "Automate Rostering", sub: "Upload a roster, confirm the drop-off and build routes." }
+      ? { title: "AutoRoster", sub: "Upload a roster, confirm the drop-off and build routes." }
       : activeTab === "routes"
         ? { title: "Route review", sub: "Check journey times, then open a route to see its pickup list." }
         : activeTab === "employees"
@@ -955,8 +956,11 @@ export default function App() {
       {/* Mobile top bar */}
       <header className="mobile-header">
         <div className="mobile-brand">
-          <span className="brand-mark"><Bus size={16} /></span>
-          <span>AutoRoster</span>
+          <img src={lvShindeLogo} alt="L. V. Shinde Group" className="mobile-logo-img" />
+          <div className="mobile-brand-text">
+            <span className="mobile-company-tag">SUPREME FACILITY MANAGEMENT</span>
+            <span className="mobile-brand-title">AutoRoster</span>
+          </div>
         </div>
         <button
           type="button"
@@ -973,26 +977,51 @@ export default function App() {
       {/* Sidebar */}
       <aside className={`sidebar ${mobileMenuOpen ? "open" : ""}`}>
         <div className="sidebar-brand">
-          <div className="brand">
-            <span className="brand-mark"><Bus size={19} /></span>
-            <span className="brand-text">
-              <span className="brand-name">AutoRoster</span>
-              <span className="brand-sub">Employee Transport</span>
-            </span>
+          {/* Horizontal Company Branding Row */}
+          <div className="brand-company-row">
+            <div className="brand-logo-wrap">
+              <img
+                src={lvShindeLogo}
+                alt="L. V. Shinde Group - Since 1983"
+                className="brand-logo-img"
+              />
+            </div>
+            <div className="brand-company-info">
+              <div className="brand-company-name">
+                SUPREME FACILITY<br />MANAGEMENT LIMITED
+              </div>
+              <div className="brand-company-tagline">
+                Making Sustainability Common Place
+              </div>
+            </div>
+            <button
+              type="button"
+              className="sidebar-close-btn"
+              onClick={() => setMobileMenuOpen(false)}
+              aria-label="Close sidebar"
+            >
+              <X size={16} />
+            </button>
           </div>
-          <button type="button" className="sidebar-close-btn" onClick={() => setMobileMenuOpen(false)} aria-label="Close sidebar">
-            <X size={16} />
-          </button>
+
+          {/* Subtle Horizontal Divider */}
+          <div className="brand-divider" aria-hidden="true" />
+
+          {/* Application Identity */}
+          <div className="brand-app-section">
+            <div className="brand-app-title">AutoRoster</div>
+            <div className="brand-app-subtitle">Employee Transport System</div>
+          </div>
         </div>
 
-        <div>
+        <div className="sidebar-nav-section">
           <div className="nav-label">Workspace</div>
           <nav className="sidebar-nav">
             {navItems.map(({ id, label, icon: Icon, needsData, badge }) => (
               <button
                 key={id}
                 type="button"
-                className={`nav-item ${activeTab === id && (!needsData || clustering) ? "active" : ""}`}
+                className={`nav-item ${activeTab === id ? "active" : ""}`}
                 disabled={needsData && !clustering}
                 title={needsData && !clustering ? "Build routes to unlock this view" : label}
                 onClick={() => goTo(id)}
@@ -1056,72 +1085,24 @@ export default function App() {
               </button>
             </div>
 
-            {destination && Object.keys(shiftStartTimes).length > 0 && (
-              <>
-                <label className="setup-field">
-                  <div className="setup-stack">
-                    <span className="setup-label">Plan Shift</span>
-                    <select
-                      className="select-field"
-                      value={selectedTimeShift || "ALL"}
-                      onChange={(event) => { setSelectedTimeShift(event.target.value); setStatusMessage(""); }}
-                      disabled={isOptimising}
-                      aria-label="Select shifts to plan"
-                    >
-                      <option value="ALL">All shifts (A, B, C)</option>
-                      {Object.keys(shiftStartTimes).sort().map((shift) => (
-                        <option key={shift} value={shift}>Shift {shift} only</option>
-                      ))}
-                    </select>
-                  </div>
-                </label>
-                {selectedTimeShift && selectedTimeShift !== "ALL" ? (
-                  <label className="setup-field">
-                    <div className="setup-stack">
-                      <span className="setup-label">Shift {selectedTimeShift} starts at</span>
-                      <input
-                        type="time"
-                        required
-                        className="input-field"
-                        value={shiftStartTimes[selectedTimeShift] || ""}
-                        onChange={(event) => {
-                          setShiftStartTimes((current) => ({ ...current, [selectedTimeShift]: event.target.value }));
-                          setStatusMessage("");
-                        }}
-                        disabled={isOptimising || !selectedTimeShift}
-                        aria-label={`Start time for Shift ${selectedTimeShift}`}
-                      />
-                    </div>
-                    {needsShiftTimeRerun && clustering && <span className="pill pill-warn">Re-run to apply</span>}
-                  </label>
-                ) : (
-                  <div className="setup-field" style={{ minWidth: "260px" }}>
-                    <div className="setup-stack">
-                      <span className="setup-label">Shift start times</span>
-                      <div style={{ display: "flex", gap: "8px", alignItems: "center", flexWrap: "wrap", marginTop: "2px" }}>
-                        {Object.keys(shiftStartTimes).sort().map((s) => (
-                          <label key={s} style={{ display: "inline-flex", alignItems: "center", gap: "4px", fontSize: "12px", color: "var(--text-muted)", cursor: "pointer" }}>
-                            <span style={{ fontWeight: 700, color: "var(--text)" }}>{s}:</span>
-                            <input
-                              type="time"
-                              className="input-field"
-                              style={{ padding: "3px 6px", fontSize: "12px", width: "92px", height: "30px" }}
-                              value={shiftStartTimes[s] || ""}
-                              onChange={(e) => {
-                                setShiftStartTimes((curr) => ({ ...curr, [s]: e.target.value }));
-                                setStatusMessage("");
-                              }}
-                              disabled={isOptimising}
-                              aria-label={`Start time for Shift ${s}`}
-                            />
-                          </label>
-                        ))}
-                      </div>
-                    </div>
-                    {needsShiftTimeRerun && clustering && <span className="pill pill-warn">Re-run to apply</span>}
-                  </div>
-                )}
-              </>
+            {destination && (
+              <label className="setup-field">
+                <div className="setup-stack">
+                  <span className="setup-label">Select Shift</span>
+                  <select
+                    className="select-field"
+                    value={selectedTimeShift}
+                    onChange={(event) => { setSelectedTimeShift(event.target.value); setStatusMessage(""); }}
+                    disabled={isOptimising}
+                    aria-label="Select shift to plan"
+                  >
+                    <option value="A">A shift</option>
+                    <option value="B">B shift</option>
+                    <option value="C">C shift</option>
+                    <option value="ALL">All shifts</option>
+                  </select>
+                </div>
+              </label>
             )}
           </section>
         )}

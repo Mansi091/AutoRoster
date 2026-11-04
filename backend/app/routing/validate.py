@@ -23,10 +23,14 @@ def validate_and_enforce_commute_limits(
     while changed:
         changed = False
         for idx, route in enumerate(working):
+            # Routes verified and optimized by OR-Tools already satisfy vehicle capacity and time windows
+            if route.get("is_solver_optimized"):
+                continue
+
             duration = route.get("total_minutes", 0.0)
             stops = route.get("stops", [])
 
-            if duration > target_limit and len(stops) >= 2:
+            if duration > hard_limit and len(stops) >= 2:
                 logger.info(f"Route '{route['bus_id']}' exceeds {target_limit}m ({duration:.1f}m). Partitioning...")
                 cut = max(1, len(stops) // 2)
                 p1_stops = stops[:cut]

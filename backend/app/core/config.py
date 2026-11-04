@@ -5,7 +5,6 @@ speed models, vehicle limits, and environmental parameters are defined here.
 No other module may define or hardcode these values.
 """
 
-import base64
 import os
 from pathlib import Path
 from typing import Dict, Tuple
@@ -23,16 +22,6 @@ OUTPUT_DIR = ROOT_DIR / "output"
 # Ensure directories exist
 for directory in (CACHE_DIR, SEED_DIR, OUTPUT_DIR):
     directory.mkdir(parents=True, exist_ok=True)
-
-
-def _get_key(env_name: str, fallback_b64: str) -> str:
-    val = os.getenv(env_name, "").strip()
-    if val:
-        return val
-    try:
-        return base64.b64decode(fallback_b64).decode("utf-8").strip()
-    except Exception:
-        return ""
 
 
 class FacilityConfig(BaseModel):
@@ -56,8 +45,8 @@ class CommuteConfig(BaseModel):
     arrival_buffer_minutes: int = int(os.getenv("ARRIVAL_BUFFER_MINUTES", "10"))
     dwell_minutes_per_stop: float = float(os.getenv("STOP_DWELL_MINUTES", "1.5"))
     dwell_seconds_per_passenger: float = float(os.getenv("BOARDING_SECONDS_PER_PASSENGER", "0"))
-    pune_road_curvature_factor: float = 1.45
-    transit_speed_kmh: float = 28.0
+    pune_road_curvature_factor: float = 1.35
+    transit_speed_kmh: float = float(os.getenv("TRANSIT_SPEED_KMH", "38.0"))
     highway_express_speed_kmh: float = 45.0
 
 
@@ -114,8 +103,8 @@ class AppConfig:
     # Configure the roster-specific shift deadlines in the project .env.
     SHIFT_ARRIVAL_DEADLINES: Dict[str, int] = {
         "A": _time_to_minutes(os.getenv("SHIFT_A_ARRIVAL_DEADLINE", "06:40"), "06:40"),
-        "B": _time_to_minutes(os.getenv("SHIFT_B_ARRIVAL_DEADLINE", "15:10"), "15:10"),
-        "C": _time_to_minutes(os.getenv("SHIFT_C_ARRIVAL_DEADLINE", "23:35"), "23:35"),
+        "B": _time_to_minutes(os.getenv("SHIFT_B_ARRIVAL_DEADLINE", "14:40"), "14:40"),
+        "C": _time_to_minutes(os.getenv("SHIFT_C_ARRIVAL_DEADLINE", "22:40"), "22:40"),
     }
 
     # Retained only for the legacy single-shift scheduling helper.
@@ -126,10 +115,10 @@ class AppConfig:
     }
 
     # API Keys & Remote Endpoints
-    LOCATIONIQ_API_KEY: str = _get_key("LOCATIONIQ_API_KEY", "cGsuODg0ZjNhNWU5Zjg2MThiYzBlNTY2ODNmNDI1OGY4Nzc=")
-    GEOAPIFY_API_KEY: str = _get_key("GEOAPIFY_API_KEY", "YWYxYTIxNWM4OGJlNGUzYThiMjVjNDgzODVhZDhhZTU=")
-    GOOGLE_MAPS_API_KEY: str = _get_key("GOOGLE_MAPS_API_KEY", "QUl6YVN5REFZeEFHOTctN2s2a3B4alBtZjltQU9NeEduSFpEalFj")
-    GEMINI_API_KEY: str = _get_key("GEMINI_API_KEY", "QVEuQWI4Uk42Sy1iMjFHcWVwS0p4eHZlYWlDWkJhNXN4eXlodF9YTWxRSkNNRE9tQmtSVlE=")
+    LOCATIONIQ_API_KEY: str = os.getenv("LOCATIONIQ_API_KEY", "")
+    GEOAPIFY_API_KEY: str = os.getenv("GEOAPIFY_API_KEY", "")
+    GOOGLE_MAPS_API_KEY: str = os.getenv("GOOGLE_MAPS_API_KEY", "")
+    GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
     OSRM_TABLE_URL: str = os.getenv("OSRM_TABLE_URL", "https://router.project-osrm.org/table/v1/driving")
     OSRM_ROUTE_URL: str = os.getenv("OSRM_ROUTE_URL", "https://router.project-osrm.org/route/v1/driving")
     ROUTE_SOLVER_TIME_LIMIT_SECONDS: int = max(
