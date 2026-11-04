@@ -272,6 +272,11 @@ export default function App() {
   }, [currentUser?.id]);
 
   useEffect(() => {
+    // Proactively warm up backend service so requests never hit cold-start timeouts
+    fetch("/api/health").catch(() => {});
+  }, []);
+
+  useEffect(() => {
     if (!isLoaded || !isSignedIn) {
       setShiftStartTimes({});
       setSelectedTimeShift("ALL");
@@ -386,11 +391,20 @@ export default function App() {
       }));
       formData.append("shift_filter", effectiveShift);
       formData.append("shift_start_times", JSON.stringify(currentShiftTimes));
-      const res = await authenticatedFetch("/api/plan_multi_shift", {
-        method: "POST",
-        body: formData,
-        signal: abortController.signal,
-      }, getToken);
+      let res;
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        res = await authenticatedFetch("/api/plan_multi_shift", {
+          method: "POST",
+          body: formData,
+          signal: abortController.signal,
+        }, getToken);
+        if ((res.status === 502 || res.status === 504) && attempt === 1) {
+          setStatusMessage("Transit engine is waking up, retrying route calculation...");
+          await new Promise((resolve) => setTimeout(resolve, 3000));
+          continue;
+        }
+        break;
+      }
 
       const text = await res.text();
       let data = {};

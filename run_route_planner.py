@@ -45,7 +45,7 @@ DWELL_TIME_MIN = STOP_DWELL_SECONDS / 60.0
 BOARDING_SECONDS_PER_PASSENGER = getattr(config.COMMUTE, "dwell_seconds_per_passenger", 10.0)
 KM_WEIGHT = getattr(config, "KM_WEIGHT", getattr(config.COMMUTE, "km_weight", 0.05))
 MERGE_RADIUS_METERS = config.PICKUP_MERGE_RADIUS_METERS
-SOLVER_TIME_LIMIT_SECONDS = getattr(config, "ROUTE_SOLVER_TIME_LIMIT_SECONDS", 20)
+SOLVER_TIME_LIMIT_SECONDS = getattr(config, "ROUTE_SOLVER_TIME_LIMIT_SECONDS", 3)
 
 ROUTE_TIME_TOLERANCE_SEC = getattr(config, "ROUTE_TIME_TOLERANCE_SEC", 60.0)
 OSRM_ROUTE_CONTINUE_STRAIGHT = getattr(config, "OSRM_ROUTE_CONTINUE_STRAIGHT", "false").strip().lower()
@@ -669,9 +669,12 @@ def repair_route_sequences(
     max_ride_sec: Optional[int] = None,
     stop_dwell_sec: Optional[float] = None,
     boarding_sec_pax: Optional[float] = None,
+    fetch_geom: bool = True,
+    dist_matrix: Optional[List[List[float]]] = None,
 ) -> Tuple[List[Tuple[List[int], Dict[str, Any]]], List[int]]:
     """Validate routes using route_duration_sec and split any route over MAX_RIDE_TIME_SEC.
     With 'table': Route API is used ONLY for map geometry, never to split routes.
+    When fetch_geom=False, uses fast in-memory distance estimation from dist_matrix without network calls.
     """
     src = (source or FEASIBILITY_SOURCE).strip().lower()
     limit_sec = MAX_RIDE_TIME_SEC if max_ride_sec is None else int(max_ride_sec)
@@ -722,13 +725,33 @@ def repair_route_sequences(
     # Attach map geometry from OSRM Route API for each final accepted sequence
     final_routes: List[Tuple[List[int], Dict[str, Any]]] = []
     for r_seq in split_routes:
-        waypoints = [(nodes[idx]["lat"], nodes[idx]["lon"]) for idx in r_seq]
-        waypoints.append((facility["lat"], facility["lon"]))
-        try:
-            geom_info = fetch_osrm_route_geometry(waypoints)
-        except UnreachableRoadRouteError:
-            outliers.extend(r_seq)
-            continue
+        if fetch_geom:
+            waypoints = [(nodes[idx]["lat"], nodes[idx]["lon"]) for idx in r_seq]
+            waypoints.append((facility["lat"], facility["lon"]))
+            try:
+                geom_info = fetch_osrm_route_geometry(waypoints)
+            except UnreachableRoadRouteError:
+                outliers.extend(r_seq)
+                continue
+        else:
+            d_m = 0.0
+            leg_dists_km = []
+            if dist_matrix is not None and r_seq:
+                curr = r_seq[0]
+                for nxt in r_seq[1:]:
+                    step_m = float(dist_matrix[curr][nxt])
+                    leg_dists_km.append(round(step_m / 1000.0, 3))
+                    d_m += step_m
+                    curr = nxt
+                final_leg_m = float(dist_matrix[curr][plant_node])
+                leg_dists_km.append(round(final_leg_m / 1000.0, 3))
+                d_m += final_leg_m
+            geom_info = {
+                "distance_km": round(d_m / 1000.0, 2),
+                "leg_distances_km": leg_dists_km,
+                "geometry": None,
+                "leg_durations_sec": [time_matrix[a][b] for a, b in zip(r_seq, r_seq[1:] + [plant_node])],
+            }
         final_routes.append((r_seq, geom_info))
 
     return final_routes, outliers
@@ -1183,7 +1206,12 @@ def solve_shift_routes(
                     v_warm_routes, warm_imp = [], set()
                     for r_stops in warm_routes:
                         repaired, impossible = repair_route_sequences(
-                            r_stops, nodes, time_matrix, plant_node, facility
+                            r_stops, nodes, time_matrix, plant_node, facility,
+                            max_ride_sec=local_max_ride_sec,
+                            stop_dwell_sec=local_stop_dwell_sec,
+                            boarding_sec_pax=local_boarding_sec_pax,
+                            fetch_geom=False,
+                            dist_matrix=dist_matrix,
                         )
                         v_warm_routes.extend(repaired)
                         warm_imp.update(impossible)
@@ -1200,6 +1228,8 @@ def solve_shift_routes(
                 max_ride_sec=local_max_ride_sec,
                 stop_dwell_sec=local_stop_dwell_sec,
                 boarding_sec_pax=local_boarding_sec_pax,
+                fetch_geom=False,
+                dist_matrix=dist_matrix,
             )
             prev_v_routes.extend(repaired)
             prev_imp.update(impossible)
@@ -1238,6 +1268,8 @@ def solve_shift_routes(
                 max_ride_sec=local_max_ride_sec,
                 stop_dwell_sec=local_stop_dwell_sec,
                 boarding_sec_pax=local_boarding_sec_pax,
+                fetch_geom=False,
+                dist_matrix=dist_matrix,
             )
             v_routes.extend(repaired)
             imp_nodes.update(impossible)
@@ -1262,6 +1294,8 @@ def solve_shift_routes(
                         max_ride_sec=local_max_ride_sec,
                         stop_dwell_sec=local_stop_dwell_sec,
                         boarding_sec_pax=local_boarding_sec_pax,
+                        fetch_geom=False,
+                        dist_matrix=dist_matrix,
                     )
                     chk_routes.extend(repaired)
                     chk_impossible.update(impossible)
@@ -1290,7 +1324,21 @@ def solve_shift_routes(
         # Choose best plan: (employees served desc, buses asc, target excess asc, km asc)
         best_candidate = min(candidate_plans_by_strategy, key=lambda item: item[0])
         print(f"[Candidate Selection] Selected best plan: {best_candidate[3]} (served={-best_candidate[0][0]}, buses={best_candidate[0][1]}, excess={best_candidate[0][2]}s, km={best_candidate[0][3]:.1f})")
-        validated_routes, impossible_nodes = best_candidate[1], best_candidate[2]
+        validated_routes, impossible_nodes = best_candidate[1], set(best_candidate[2])
+
+        # Attach real OSRM Route API geometry and exact road durations for winning routes
+        real_validated_routes = []
+        for route_stops, road_info in validated_routes:
+            if not road_info.get("geometry") or not road_info.get("leg_durations_sec"):
+                waypoints = [(nodes[idx]["lat"], nodes[idx]["lon"]) for idx in route_stops]
+                waypoints.append((facility["lat"], facility["lon"]))
+                try:
+                    road_info = fetch_osrm_route_geometry(waypoints)
+                except UnreachableRoadRouteError:
+                    impossible_nodes.update(route_stops)
+                    continue
+            real_validated_routes.append((route_stops, road_info))
+        validated_routes = real_validated_routes
 
         for route_stops, road_info in validated_routes:
             route_demand = sum(nodes[node_idx]["demand"] for node_idx in route_stops)

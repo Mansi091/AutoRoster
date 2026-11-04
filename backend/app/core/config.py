@@ -135,7 +135,7 @@ class AppConfig:
     OSRM_TABLE_URL: str = os.getenv("OSRM_TABLE_URL", "https://router.project-osrm.org/table/v1/driving")
     OSRM_ROUTE_URL: str = os.getenv("OSRM_ROUTE_URL", "https://router.project-osrm.org/route/v1/driving")
     ROUTE_SOLVER_TIME_LIMIT_SECONDS: int = max(
-        1, min(300, int(os.getenv("ROUTE_SOLVER_TIME_LIMIT_SECONDS", "20")))
+        1, min(300, int(os.getenv("ROUTE_SOLVER_TIME_LIMIT_SECONDS", "3")))
     )
     KM_WEIGHT: float = float(os.getenv("KM_WEIGHT", "0.05"))
     PICKUP_MERGE_RADIUS_METERS: float = float(os.getenv("PICKUP_MERGE_RADIUS_METERS", "400"))
