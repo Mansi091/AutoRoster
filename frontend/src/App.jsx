@@ -219,6 +219,7 @@ export default function App() {
   const [scenariosData, setScenariosData] = useState(null);
   const [selectedScenarioName, setSelectedScenarioName] = useState("current config");
   const [showScenariosModal, setShowScenariosModal] = useState(false);
+  const [isEvaluatingScenarios, setIsEvaluatingScenarios] = useState(false);
   const [originalShifts, setOriginalShifts] = useState(null);
   const [uploadedRosterFile, setUploadedRosterFile] = useState(null);
   const [isOptimising, setIsOptimising] = useState(false);
@@ -772,6 +773,29 @@ export default function App() {
   };
 
   // Supervisor Drop-off Confirmation
+  const handleRunAllScenarios = async () => {
+    setIsEvaluatingScenarios(true);
+    try {
+      const token = await getToken();
+      const res = await fetch("/api/evaluate_scenarios", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({}),
+      });
+      const data = await res.json();
+      if (data.status === "SUCCESS" && data.scenarios) {
+        setScenariosData(data.scenarios);
+      }
+    } catch (e) {
+      console.warn("Could not evaluate scenarios:", e);
+    } finally {
+      setIsEvaluatingScenarios(false);
+    }
+  };
+
   const handleConfirmDropoff = async (item) => {
     setIsConfirmingDropoff(true);
     setConfirmedDropoff(item);
@@ -1254,6 +1278,25 @@ export default function App() {
                   Evaluate fleet size, distance, and commute time trade-offs across different operating assumptions. The default active plan remains <strong>current config</strong>.
                 </p>
 
+                {(scenariosData.comparison_table || []).length <= 1 && (
+                  <div style={{ marginBottom: "16px", padding: "12px 16px", background: "var(--light-bg)", border: "1px solid var(--border-grey)", borderRadius: "8px", display: "flex", justifyContent: "space-between", alignItems: "center", gap: "12px", flexWrap: "wrap" }}>
+                    <div>
+                      <strong>Full Scenario Sensitivity Analysis</strong>
+                      <div style={{ fontSize: "12px", color: "var(--secondary-grey)" }}>
+                        Simulate 5 alternative operational scenarios (tight dwell, extended commute, arrival buffers).
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      className="btn btn-secondary btn-sm"
+                      onClick={handleRunAllScenarios}
+                      disabled={isEvaluatingScenarios}
+                    >
+                      <RefreshCw size={13} className={isEvaluatingScenarios ? "spin" : ""} />
+                      {isEvaluatingScenarios ? "Simulating scenarios..." : "Run full sensitivity analysis"}
+                    </button>
+                  </div>
+                )}
                 <div style={{ overflowX: "auto", border: "1px solid var(--border-grey)", borderRadius: "8px" }}>
                   <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "13px" }}>
                     <thead>
