@@ -16,6 +16,7 @@ def health_check():
         "max_commute_target_minutes": config.COMMUTE.target_commute_minutes,
         "hard_max_commute_minutes": config.COMMUTE.hard_max_commute_minutes,
         "bus_capacity": config.FLEET.standard_bus_capacity,
+        "solver_time_limit_seconds": config.ROUTE_SOLVER_TIME_LIMIT_SECONDS,
         "keys_configured": {
             "google_maps": bool(config.GOOGLE_MAPS_API_KEY),
             "locationiq": bool(config.LOCATIONIQ_API_KEY),
