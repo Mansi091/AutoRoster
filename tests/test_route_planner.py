@@ -133,8 +133,7 @@ def assert_universal_invariants(res: Dict[str, Any], shift_employees: List[Dict[
     )
 
     # 2. Per-route invariants
-    deadline_min = config.SHIFT_ARRIVAL_DEADLINES.get(shift_name, 390)
-    shift_start_min = deadline_min + ARRIVAL_BUFFER_MIN
+    shift_start_min = config.SHIFT_START_TIMES[shift_name]
 
     for r in routes:
         bus_no = r["route_no"]

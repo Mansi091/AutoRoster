@@ -65,9 +65,39 @@ def _display_ampm(minutes: int) -> str:
     return f"{hour % 12 or 12:02d}:{minute:02d} {'AM' if hour < 12 else 'PM'}"
 
 
+def resolve_shift_start_min(shift: str, shift_start_times: Optional[Dict[str, int]] = None) -> int:
+    """Shift start minute-of-day: the submitted value when given, else config."""
+    if shift_start_times and shift in shift_start_times:
+        return int(shift_start_times[shift])
+    return int(config.SHIFT_START_TIMES[shift])
+
+
+def arrival_deadline_min(shift_start_min: float, arrival_buffer_min: float) -> float:
+    """Gate arrival deadline: shift start minus the (possibly scenario-specific) buffer."""
+    return float(shift_start_min) - float(arrival_buffer_min)
+
+
+def pickup_window_before_start_min(shift_start_min: float, first_pickup_min: float) -> float:
+    """How many minutes before shift start the first pickup happens."""
+    return float(shift_start_min) - float(first_pickup_min)
+
+
+def shift_time_labels(shift_start_min: float, arrival_buffer_min: float) -> Dict[str, Any]:
+    """Display fields for one shift, derived only from shift start and arrival buffer."""
+    deadline = arrival_deadline_min(shift_start_min, arrival_buffer_min)
+    deadline_display = int(round(deadline))
+    return {
+        "shift_start_min": float(shift_start_min),
+        "deadline_min": deadline,
+        "deadline": _display_clock(deadline_display),
+        "in_time": _display_clock(int(round(shift_start_min))),
+        "display_deadline": _display_ampm(deadline_display),
+    }
+
+
 print(
-    f"[Startup] Shift arrival deadlines from .env: "
-    + ", ".join([f"{s}={_display_clock(d)} (start {_display_clock(d + ARRIVAL_BUFFER_MIN)})" for s, d in config.SHIFT_ARRIVAL_DEADLINES.items()])
+    f"[Startup] Shift start times from config: "
+    + ", ".join([f"{s}={_display_clock(m)} (gate deadline {_display_clock(m - ARRIVAL_BUFFER_MIN)})" for s, m in config.SHIFT_START_TIMES.items()])
 )
 print(
     f"[Startup] Commute limits: PICKUP_WINDOW_HARD={PICKUP_WINDOW_HARD:g}m, ARRIVAL_BUFFER={ARRIVAL_BUFFER_MIN:g}m => "
@@ -79,13 +109,8 @@ print(
 
 
 SHIFT_CONFIG = {
-    shift: {
-        "deadline_min": deadline,
-        "deadline": _display_clock(deadline),
-        "in_time": _display_clock(deadline + config.COMMUTE.arrival_buffer_minutes),
-        "display_deadline": _display_ampm(deadline),
-    }
-    for shift, deadline in config.SHIFT_ARRIVAL_DEADLINES.items()
+    shift: shift_time_labels(start_min, ARRIVAL_BUFFER_MIN)
+    for shift, start_min in config.SHIFT_START_TIMES.items()
 }
 
 
@@ -951,7 +976,7 @@ def solve_shift_routes(
     stop_lookup: Dict[str, Any],
     facility: Dict[str, Any],
     resolution_details: Optional[Dict[str, Dict[str, Any]]] = None,
-    shift_deadlines: Optional[Dict[str, int]] = None,
+    shift_start_times: Optional[Dict[str, int]] = None,
     plan_history_mode: Optional[str] = None,
     scenario_overrides: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
@@ -970,12 +995,9 @@ def solve_shift_routes(
     local_max_ride_sec = int(round(local_max_ride_min * 60))
     local_target_ride_sec = int(round(local_target_ride_min * 60))
 
-    cfg = dict(SHIFT_CONFIG[shift])
-    if shift_deadlines and shift in shift_deadlines:
-        cfg["deadline_min"] = int(shift_deadlines[shift])
-        cfg["deadline"] = _display_clock(cfg["deadline_min"])
-        cfg["in_time"] = _display_clock(cfg["deadline_min"] + config.COMMUTE.arrival_buffer_minutes)
-        cfg["display_deadline"] = _display_ampm(cfg["deadline_min"])
+    # Shift start is the source of truth; the gate deadline uses this run's buffer.
+    shift_start_min = resolve_shift_start_min(shift, shift_start_times)
+    cfg = shift_time_labels(shift_start_min, local_arrival_buffer_min)
     deadline_min = cfg["deadline_min"]
 
     # 1. Map employees to verified physical coordinates
@@ -1024,6 +1046,10 @@ def solve_shift_routes(
     if num_pickups == 0:
         return {
             "shift": shift, "routes": [], "buses_used": 0, "avg_occupancy_pct": 0.0,
+            "shift_start": cfg["in_time"], "plant_deadline": cfg["display_deadline"],
+            "shift_start_minute_of_day": shift_start_min,
+            "arrival_buffer_minutes": local_arrival_buffer_min,
+            "plant_deadline_minute_of_day": round(deadline_min, 3),
             "total_distance_km": 0.0, "longest_ride_time_min": 0.0,
             "total_employees_in_roster": len(employees), "assigned_passengers": 0,
             "outliers": outliers,
@@ -1419,13 +1445,15 @@ def solve_shift_routes(
                     "demand": nodes[node_idx]["demand"],
                     "scheduled_time": f"{display_hour:02d}:{p_rem:02d} {period}",
                     "pickup_minute_of_day": p_min,
+                    "pickup_minute_exact": round(pickup_minute_of_day, 3),
                     "employees": nodes[node_idx]["employees"],
                 })
 
             # Invariant check: first_pickup_time >= shift_start - local_pickup_window_hard
-            shift_start_min = deadline_min + local_arrival_buffer_min
             first_pickup_min = detailed_stops[0]["pickup_minute_of_day"]
-            pickup_window_min = shift_start_min - first_pickup_min
+            exact_first_pickup_min = detailed_stops[0]["pickup_minute_exact"]
+            exact_pickup_window_min = pickup_window_before_start_min(shift_start_min, exact_first_pickup_min)
+            pickup_window_min = pickup_window_before_start_min(shift_start_min, first_pickup_min)
             assert pickup_window_min <= local_pickup_window_hard + 0.5, (
                 f"Bus {buses_used}: first pickup at minute {first_pickup_min} is {pickup_window_min:.1f}m before shift start ({shift_start_min}), "
                 f"exceeding hard window of {local_pickup_window_hard:g}m!"
@@ -1470,6 +1498,8 @@ def solve_shift_routes(
                 "leg_distances_km": leg_distances,
                 "first_pickup_time": detailed_stops[0]["scheduled_time"],
                 "plant_arrival_time": cfg["display_deadline"],
+                "plant_arrival_minute_of_day": round(deadline_min, 3),
+                "first_pickup_before_shift_min": round(exact_pickup_window_min, 2),
                 "road_geometry": actual_geometry,
                 "ride_time_status": (
                     "ON_TARGET" if route_duration_sec_val <= local_target_ride_sec else "WITHIN_ALLOWANCE"
@@ -1555,6 +1585,9 @@ def solve_shift_routes(
         "plan_signature": plan_signature,
         "shift_start": cfg["in_time"],
         "plant_deadline": cfg["display_deadline"],
+        "shift_start_minute_of_day": shift_start_min,
+        "arrival_buffer_minutes": local_arrival_buffer_min,
+        "plant_deadline_minute_of_day": round(deadline_min, 3),
         "total_employees_in_roster": len(employees),
         "assigned_passengers": assigned_passengers,
         "buses_used": buses_used,
@@ -1811,21 +1844,70 @@ def _primary_shift(shift_value: str) -> str:
 
 
 
+def max_first_pickup_before_shift_min(shift_results: List[Dict[str, Any]]) -> float:
+    """Largest gap between a bus's first pickup and its shift start, across all shifts."""
+    return max(
+        (float(r.get("first_pickup_before_shift_min", 0.0)) for s in shift_results for r in s.get("routes", [])),
+        default=0.0,
+    )
+
+
+def complies_with_client_rule(max_window_min: float, client_window_hard_min: float) -> bool:
+    """Client rule: no first pickup earlier than PICKUP_WINDOW_HARD before shift start."""
+    return max_window_min <= client_window_hard_min
+
+
+def summarize_scenario(
+    name: str,
+    description: str,
+    overrides: Dict[str, Any],
+    shift_results: List[Dict[str, Any]],
+    base_buses: int,
+    client_window_hard_min: float,
+) -> Dict[str, Any]:
+    """One comparison-table row built only from the solved shift results."""
+    total_buses = sum(s.get("buses_used", len(s.get("routes", []))) for s in shift_results)
+    total_pax = sum(s.get("assigned_passengers", 0) for s in shift_results)
+    all_routes = [r for s in shift_results for r in s.get("routes", [])]
+    max_window = max_first_pickup_before_shift_min(shift_results)
+    compliant = complies_with_client_rule(max_window, client_window_hard_min)
+    return {
+        "scenario_name": name,
+        "description": description,
+        "buses": total_buses,
+        "buses_by_shift": {s.get("shift"): s.get("buses_used", len(s.get("routes", []))) for s in shift_results},
+        "total_km": round(sum(s.get("total_distance_km", 0.0) for s in shift_results), 1),
+        "avg_pax_per_bus": round(total_pax / total_buses, 1) if total_buses else 0.0,
+        "max_ride_min": round(max((r.get("route_duration_min", 0.0) for r in all_routes), default=0.0), 1),
+        "max_first_pickup_before_shift_min": round(max_window, 1),
+        "client_pickup_window_hard_min": client_window_hard_min,
+        "complies_with_client_rule": compliant,
+        "client_rule_status": "COMPLIANT" if compliant else "BREAKS CLIENT RULE",
+        "buses_saved_vs_current": base_buses - total_buses,
+        "near_limit_buses": sum(1 for r in all_routes if r.get("is_near_hard_limit")),
+        "overrides": overrides,
+    }
+
+
 def evaluate_all_scenarios(
     all_employees: List[Dict[str, Any]],
     stop_lookup: Dict[str, Dict[str, Any]],
     facility: Dict[str, Any],
     resolution_details: Optional[Dict[str, Any]] = None,
-    shift_deadlines: Optional[Dict[str, int]] = None,
+    shift_start_times: Optional[Dict[str, int]] = None,
     shift_filter: str = "ALL",
     scenarios: Optional[List[Dict[str, Any]]] = None,
     baseline_results: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
-    """Evaluates all scenarios from config cold across all shifts and computes comparison metrics."""
+    """Evaluates all scenarios cold across all shifts and computes comparison metrics.
+
+    Shift start times stay fixed across scenarios; each scenario's own arrival buffer
+    sets its gate deadline. Compliance is always judged against the CURRENT config
+    PICKUP_WINDOW_HARD (the client rule), not the scenario's override.
+    """
     scenario_list = scenarios or load_scenarios()
     comparison_table = []
     scenario_plans: Dict[str, Any] = {}
-
     shift_keys = ["A", "B", "C"] if shift_filter == "ALL" else [shift_filter]
     base_buses = 0
 
@@ -1841,71 +1923,31 @@ def evaluate_all_scenarios(
         if idx == 0 and baseline_results is not None:
             shift_results = baseline_results
         else:
-            shift_results = []
-            for shift_key in shift_keys:
-                shift_emps = [e for e in all_employees if _primary_shift(e["shift"]) == shift_key]
-                res = solve_shift_routes(
+            shift_results = [
+                solve_shift_routes(
                     shift_key,
-                    shift_emps,
+                    [e for e in all_employees if _primary_shift(e["shift"]) == shift_key],
                     stop_lookup,
                     facility,
                     resolution_details=resolution_details,
-                    shift_deadlines=shift_deadlines,
+                    shift_start_times=shift_start_times,
                     plan_history_mode="ignore",
                     scenario_overrides=overrides,
                 )
-                shift_results.append(res)
+                for shift_key in shift_keys
+            ]
 
         total_buses = sum(s.get("buses_used", len(s.get("routes", []))) for s in shift_results)
-        total_km = round(sum(s.get("total_distance_km", 0.0) for s in shift_results), 1)
-        total_pax = sum(s.get("assigned_passengers", 0) for s in shift_results)
-        avg_pax = round(total_pax / total_buses, 1) if total_buses else 0.0
-
-        all_routes = [r for s in shift_results for r in s.get("routes", [])]
-        max_ride_min = max((r.get("route_duration_min", 0.0) for r in all_routes), default=0.0)
-
-        # max first pickup before shift
-        max_pickup_before_shift_min = 0.0
-        for s in shift_results:
-            shift_name = s.get("shift", "A")
-            shift_cfg = SHIFT_CONFIG.get(shift_name, {})
-            dl = (shift_deadlines.get(shift_name) if shift_deadlines else None) or shift_cfg.get("deadline_min", 410)
-            arr_buf = overrides.get("ARRIVAL_BUFFER_MINUTES", ARRIVAL_BUFFER_MIN)
-            shift_start = dl + arr_buf
-            for r in s.get("routes", []):
-                stops = r.get("stops", [])
-                if stops:
-                    p_min = stops[0].get("pickup_minute_of_day")
-                    if p_min is not None:
-                        window = shift_start - p_min
-                        if window > max_pickup_before_shift_min:
-                            max_pickup_before_shift_min = window
-
-        near_limit_buses = sum(1 for r in all_routes if r.get("is_near_hard_limit"))
-
         if idx == 0:
             base_buses = total_buses
-            buses_saved = 0
-        else:
-            buses_saved = base_buses - total_buses
-
-        row = {
-            "scenario_name": sc_name,
-            "description": sc.get("description", ""),
-            "buses": total_buses,
-            "total_km": total_km,
-            "avg_pax_per_bus": avg_pax,
-            "max_ride_min": round(max_ride_min, 1),
-            "max_first_pickup_before_shift_min": round(max_pickup_before_shift_min, 1),
-            "buses_saved_vs_current": buses_saved,
-            "near_limit_buses": near_limit_buses,
-            "overrides": overrides,
-        }
+        row = summarize_scenario(
+            sc_name, sc.get("description", ""), overrides, shift_results, base_buses, float(PICKUP_WINDOW_HARD)
+        )
         comparison_table.append(row)
         scenario_plans[sc_name] = {
             "shifts": shift_results,
-            "total_buses": total_buses,
-            "total_km": total_km,
+            "total_buses": row["buses"],
+            "total_km": row["total_km"],
         }
 
     return {
@@ -1927,7 +1969,7 @@ def run_full_pipeline(
     output_excel_path: Path,
     facility: Optional[Dict[str, Any]] = None,
     pickup_resolver=None,
-    shift_deadlines: Optional[Dict[str, int]] = None,
+    shift_start_times: Optional[Dict[str, int]] = None,
     shift_filter: str = "ALL",
     plan_history_mode: Optional[str] = None,
     return_scenarios: bool = False,
@@ -2007,7 +2049,7 @@ def run_full_pipeline(
     shift_keys = ["A", "B", "C"] if shift_filter == "ALL" else [shift_filter]
     for shift_key in shift_keys:
         shift_emps = [e for e in all_employees if _primary_shift(e["shift"]) == shift_key]
-        res = solve_shift_routes(shift_key, shift_emps, stop_lookup, facility, resolution_details, shift_deadlines, plan_history_mode)
+        res = solve_shift_routes(shift_key, shift_emps, stop_lookup, facility, resolution_details, shift_start_times, plan_history_mode)
         all_results.append(res)
 
     # Generate Excel with separate sheets for each shift + Raw Data
@@ -2019,7 +2061,7 @@ def run_full_pipeline(
             stop_lookup,
             facility,
             resolution_details,
-            shift_deadlines,
+            shift_start_times,
             shift_filter,
             baseline_results=all_results,
         )

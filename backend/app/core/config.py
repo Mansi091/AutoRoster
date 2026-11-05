@@ -81,6 +81,10 @@ def _time_to_minutes(value: str, fallback: str) -> int:
     return hours * 60 + minutes
 
 
+def _derive_shift_start_times(deadlines: Dict[str, int], arrival_buffer_minutes: float) -> Dict[str, int]:
+    return {shift: int(round(deadline + arrival_buffer_minutes)) % 1440 for shift, deadline in deadlines.items()}
+
+
 class AppConfig:
     # Directories
     ROOT_DIR: Path = ROOT_DIR
@@ -119,6 +123,12 @@ class AppConfig:
         "B": _time_to_minutes(os.getenv("SHIFT_B_ARRIVAL_DEADLINE", "14:40"), "14:40"),
         "C": _time_to_minutes(os.getenv("SHIFT_C_ARRIVAL_DEADLINE", "22:40"), "22:40"),
     }
+
+    # Shift start (gate-in) times: the source of truth for every time-window rule.
+    # Derived from the configured arrival deadline plus the configured arrival buffer.
+    SHIFT_START_TIMES: Dict[str, int] = _derive_shift_start_times(
+        SHIFT_ARRIVAL_DEADLINES, COMMUTE.arrival_buffer_minutes
+    )
 
     # Retained only for the legacy single-shift scheduling helper.
     SHIFT_WINDOWS: Dict[str, Tuple[int, int, int]] = {

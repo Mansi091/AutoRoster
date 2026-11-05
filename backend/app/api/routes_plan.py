@@ -19,8 +19,8 @@ from ..etl.transform.text_cleaner_llm import text_cleaner_llm
 router = APIRouter()
 
 
-def _format_shift_start_time(arrival_deadline: int) -> str:
-    start_minute = (arrival_deadline + config.COMMUTE.arrival_buffer_minutes) % 1440
+def _format_shift_start_time(start_minute: int) -> str:
+    start_minute = int(start_minute) % 1440
     return f"{start_minute // 60:02d}:{start_minute % 60:02d}"
 
 
@@ -31,7 +31,7 @@ def planning_options(user: dict = Depends(require_authenticated_user)):
         "arrival_buffer_minutes": config.COMMUTE.arrival_buffer_minutes,
         "shift_start_times": {
             shift: _format_shift_start_time(minutes)
-            for shift, minutes in config.SHIFT_ARRIVAL_DEADLINES.items()
+            for shift, minutes in config.SHIFT_START_TIMES.items()
         }
     }
 
@@ -223,14 +223,14 @@ async def plan_multi_shift(request: Request, user: dict = Depends(require_authen
             logger.warning(f"Could not persist user dropoff file: {save_err}")
 
         shift_filter = str(form.get("shift_filter") or "ALL").strip().upper()
-        if shift_filter != "ALL" and shift_filter not in config.SHIFT_ARRIVAL_DEADLINES:
+        if shift_filter != "ALL" and shift_filter not in config.SHIFT_START_TIMES:
             return JSONResponse(
                 {"status": "ERROR", "error": "Choose All shifts or a valid shift."},
                 status_code=400,
             )
 
         submitted_start_times = form.get("shift_start_times")
-        shift_deadlines = dict(config.SHIFT_ARRIVAL_DEADLINES)
+        shift_start_times = dict(config.SHIFT_START_TIMES)
         if submitted_start_times:
             try:
                 parsed_start_times = json.loads(str(submitted_start_times))
@@ -239,10 +239,10 @@ async def plan_multi_shift(request: Request, user: dict = Depends(require_authen
             if not isinstance(parsed_start_times, dict):
                 return JSONResponse({"status": "ERROR", "error": "Shift start times are invalid."}, status_code=400)
             for shift, time_text in parsed_start_times.items():
-                if shift not in shift_deadlines or not isinstance(time_text, str) or not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", time_text):
+                if shift not in shift_start_times or not isinstance(time_text, str) or not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", time_text):
                     return JSONResponse({"status": "ERROR", "error": "Choose a valid 24-hour start time for each shift."}, status_code=400)
                 hours, minutes = (int(part) for part in time_text.split(":"))
-                shift_deadlines[shift] = (hours * 60 + minutes - config.COMMUTE.arrival_buffer_minutes) % 1440
+                shift_start_times[shift] = hours * 60 + minutes
 
         user_output_dir = config.OUTPUT_DIR / "history" / user["id"]
         user_output_dir.mkdir(parents=True, exist_ok=True)
@@ -258,7 +258,7 @@ async def plan_multi_shift(request: Request, user: dict = Depends(require_authen
             out_path,
             facility,
             resolve_roster_pickup_coordinates,
-            shift_deadlines,
+            shift_start_times,
             shift_filter,
             return_scenarios=False,
         )
@@ -376,7 +376,7 @@ async def evaluate_scenarios_endpoint(request: Request, user: dict = Depends(req
             all_employees,
             stop_lookup,
             facility,
-            shift_deadlines=dict(config.SHIFT_ARRIVAL_DEADLINES),
+            shift_start_times=dict(config.SHIFT_START_TIMES),
             shift_filter="ALL",
         )
         return {"status": "SUCCESS", "scenarios": report}

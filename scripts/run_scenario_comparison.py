@@ -61,29 +61,32 @@ def main():
         stop_lookup,
         facility,
         resolution_details,
-        shift_deadlines=dict(config.SHIFT_ARRIVAL_DEADLINES),
+        shift_start_times=dict(config.SHIFT_START_TIMES),
         shift_filter="ALL",
         scenarios=scenarios,
     )
 
     table = report["comparison_table"]
+    shift_keys = sorted({k for row in table for k in row["buses_by_shift"]})
+    shift_cols = " | ".join(f"{k:>3}" for k in shift_keys)
+    client_rule = table[0]["client_pickup_window_hard_min"] if table else 0.0
+    width = 150
 
-    print("\n" + "=" * 115)
-    print(f"{'SCENARIO NAME':<38} | {'BUSES':<5} | {'SAVED':<5} | {'TOTAL KM':<9} | {'AVG PAX':<7} | {'MAX RIDE':<8} | {'MAX WINDOW':<10} | {'NEAR-LIMIT'}")
-    print("-" * 115)
+    print("\n" + "=" * width)
+    print(f"Client rule: first pickup at most PICKUP_WINDOW_HARD={client_rule:g} min before shift start (current config)")
+    print("-" * width)
+    print(f"{'SCENARIO NAME':<46} | {shift_cols} | {'TOTAL':<5} | {'SAVED':<5} | {'TOTAL KM':<8} | {'MAX RIDE':<8} | {'MAX WINDOW':<10} | {'NEAR':<4} | CLIENT RULE")
+    print("-" * width)
     for row in table:
-        saved_str = f"+{row['buses_saved_vs_current']}" if row['buses_saved_vs_current'] > 0 else (str(row['buses_saved_vs_current']) if row['buses_saved_vs_current'] < 0 else "0")
+        saved = row["buses_saved_vs_current"]
+        saved_str = f"+{saved}" if saved > 0 else str(saved)
+        per_shift = " | ".join(f"{row['buses_by_shift'].get(k, 0):>3}" for k in shift_keys)
         print(
-            f"{row['scenario_name']:<38} | "
-            f"{row['buses']:<5} | "
-            f"{saved_str:<5} | "
-            f"{row['total_km']:<9.1f} | "
-            f"{row['avg_pax_per_bus']:<7.1f} | "
-            f"{row['max_ride_min']:<8.1f} | "
-            f"{row['max_first_pickup_before_shift_min']:<10.1f} | "
-            f"{row['near_limit_buses']} bus(es)"
+            f"{row['scenario_name']:<46} | {per_shift} | {row['buses']:<5} | {saved_str:<5} | "
+            f"{row['total_km']:<8.1f} | {row['max_ride_min']:<8.1f} | "
+            f"{row['max_first_pickup_before_shift_min']:<10.1f} | {row['near_limit_buses']:<4} | {row['client_rule_status']}"
         )
-    print("=" * 115)
+    print("=" * width)
 
     print("\n[Near-Limit Commute Diagnostics by Scenario]")
     for sc_name, plan in report["scenario_plans"].items():
