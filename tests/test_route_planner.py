@@ -19,6 +19,7 @@ from backend.app.core.config import config
 from run_route_planner import (
     load_all_verified_stops,
     solve_shift_routes,
+    solver_budget,
     _primary_shift,
     compute_plan_signature,
     get_plan_history_path,
@@ -213,7 +214,7 @@ def run_all_tests():
 
             # Check if there is an existing stored plan before this solve
             # We will read it from history if available
-            res = solve_shift_routes(shift, shift_emps, stop_lookup, facility)
+            res = solve_shift_routes(shift, shift_emps, stop_lookup, facility, search_budget=solver_budget("job"))
 
             # Test 1: Solver vs Validator Time Agreement
             assert_solver_vs_validator_agreement(res, ROUTE_TIME_TOLERANCE_SEC)

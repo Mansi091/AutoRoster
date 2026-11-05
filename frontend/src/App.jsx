@@ -36,6 +36,7 @@ import RouteMap from "./components/RouteMap";
 import AuthModal from "./components/AuthModal";
 import HistoryPanel from "./components/HistoryPanel";
 import { recordRosterHistory, authenticatedFetch } from "./utils/clerk";
+import { startJob, pollJob } from "./utils/jobs";
 
 function parseGoogleMapsLinkOrCoords(query) {
   const trimmed = (query || "").trim();
@@ -220,6 +221,9 @@ export default function App() {
   const [selectedScenarioName, setSelectedScenarioName] = useState("current config");
   const [showScenariosModal, setShowScenariosModal] = useState(false);
   const [isEvaluatingScenarios, setIsEvaluatingScenarios] = useState(false);
+  const [planProgress, setPlanProgress] = useState(null);
+  const [scenarioProgress, setScenarioProgress] = useState(null);
+  const planJobIdRef = useRef(null);
   const [originalShifts, setOriginalShifts] = useState(null);
   const [uploadedRosterFile, setUploadedRosterFile] = useState(null);
   const [isOptimising, setIsOptimising] = useState(false);
@@ -391,30 +395,20 @@ export default function App() {
       }));
       formData.append("shift_filter", effectiveShift);
       formData.append("shift_start_times", JSON.stringify(currentShiftTimes));
-      let res;
-      for (let attempt = 1; attempt <= 2; attempt++) {
-        res = await authenticatedFetch("/api/plan_multi_shift", {
-          method: "POST",
-          body: formData,
-          signal: abortController.signal,
-        }, getToken);
-        if ((res.status === 502 || res.status === 504) && attempt === 1) {
-          setStatusMessage("Transit engine is waking up, retrying route calculation...");
-          await new Promise((resolve) => setTimeout(resolve, 3000));
-          continue;
-        }
-        break;
-      }
-
-      const text = await res.text();
-      let data = {};
-      try {
-        data = JSON.parse(text);
-      } catch {
-        throw new Error(res.ok ? "Invalid server response." : `Backend service error (HTTP ${res.status}). If the server was sleeping, please retry in a few seconds.`);
-      }
-      if (!res.ok) throw new Error(data.error || data.detail || `Optimizer returned HTTP ${res.status}`);
+      setPlanProgress(null);
+      const queued = await startJob(
+        "/api/plan_multi_shift",
+        { method: "POST", body: formData, signal: abortController.signal },
+        getToken,
+        () => setStatusMessage("Transit engine is waking up, retrying route calculation..."),
+      );
+      planJobIdRef.current = null;
+      const data = await pollJob(queued.poll_url, getToken, {
+        signal: abortController.signal,
+        onProgress: (job) => setPlanProgress(job.progress),
+      });
       if (abortController.signal.aborted || activeUserIdRef.current !== planningUserId) return;
+      planJobIdRef.current = queued.job_id;
       if (data.status === "SUCCESS" && data.shifts) {
         const adapted = adaptMultiShiftResponse(data.shifts, facility);
         setClustering(adapted);
@@ -789,24 +783,29 @@ export default function App() {
   // Supervisor Drop-off Confirmation
   const handleRunAllScenarios = async () => {
     setIsEvaluatingScenarios(true);
+    setScenarioProgress(null);
     try {
-      const token = await getToken();
-      const res = await fetch("/api/evaluate_scenarios", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      const queued = await startJob(
+        "/api/scenarios/run",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ plan_job_id: planJobIdRef.current }),
         },
-        body: JSON.stringify({}),
+        getToken,
+      );
+      const data = await pollJob(queued.poll_url, getToken, {
+        onProgress: (job) => setScenarioProgress(job.progress),
       });
-      const data = await res.json();
       if (data.status === "SUCCESS" && data.scenarios) {
         setScenariosData(data.scenarios);
       }
     } catch (e) {
       console.warn("Could not evaluate scenarios:", e);
+      setStatusMessage(`Error: Could not run scenarios. ${e.message}`);
     } finally {
       setIsEvaluatingScenarios(false);
+      setScenarioProgress(null);
     }
   };
 
@@ -1307,7 +1306,11 @@ export default function App() {
                       disabled={isEvaluatingScenarios}
                     >
                       <RefreshCw size={13} className={isEvaluatingScenarios ? "spin" : ""} />
-                      {isEvaluatingScenarios ? "Simulating scenarios..." : "Run full sensitivity analysis"}
+                      {isEvaluatingScenarios
+                        ? (scenarioProgress?.total > 0
+                          ? `Simulating scenarios… ${scenarioProgress.done}/${scenarioProgress.total}`
+                          : "Simulating scenarios...")
+                        : "Run full sensitivity analysis"}
                     </button>
                   </div>
                 )}
@@ -1668,7 +1671,25 @@ export default function App() {
               <span className="planning-state"><span className="planning-live" /> In progress</span>
               <h2>Optimizing routes</h2>
               <p className="planning-desc">Assigning employees and calculating road travel times. This can take a little while for large rosters.</p>
-              <div className="progress-track" role="progressbar" aria-label="Route optimization in progress" aria-valuetext="In progress"><span /></div>
+              {planProgress?.total > 0 ? (
+                <>
+                  <div
+                    className="progress-track is-determinate"
+                    role="progressbar"
+                    aria-label="Route optimization progress"
+                    aria-valuemin={0}
+                    aria-valuemax={100}
+                    aria-valuenow={planProgress.percent}
+                  >
+                    <span style={{ width: `${Math.max(planProgress.percent, 4)}%` }} />
+                  </div>
+                  <p className="planning-stage">
+                    {planProgress.stage.charAt(0).toUpperCase() + planProgress.stage.slice(1)} · {planProgress.done} of {planProgress.total} steps
+                  </p>
+                </>
+              ) : (
+                <div className="progress-track" role="progressbar" aria-label="Route optimization in progress" aria-valuetext={planProgress?.stage || "In progress"}><span /></div>
+              )}
               <div className="planning-details">
                 <div className="planning-detail">
                   <span>Roster</span>

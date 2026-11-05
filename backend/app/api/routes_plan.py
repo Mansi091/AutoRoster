@@ -2,6 +2,7 @@
 
 import json
 import re
+import uuid
 from fastapi import APIRouter, Depends, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, JSONResponse
@@ -154,7 +155,6 @@ async def upload_file(request: Request, user: dict = Depends(require_authenticat
 @router.post("/api/plan_multi_shift")
 async def plan_multi_shift(request: Request, user: dict = Depends(require_authenticated_user)):
     try:
-        from run_route_planner import run_full_pipeline
         from .routes_dropoff import get_current_dropoff_data
 
         if "multipart/form-data" not in request.headers.get("content-type", ""):
@@ -244,84 +244,40 @@ async def plan_multi_shift(request: Request, user: dict = Depends(require_authen
                 hours, minutes = (int(part) for part in time_text.split(":"))
                 shift_start_times[shift] = hours * 60 + minutes
 
+        from ..jobs.runner import submit_plan_job
+
         user_output_dir = config.OUTPUT_DIR / "history" / user["id"]
+        user_input_dir = config.DATA_DIR / "input" / user["id"]
         user_output_dir.mkdir(parents=True, exist_ok=True)
-        raw_path = config.DATA_DIR / "input" / user["id"] / "uploaded_roster.xlsx"
-        raw_path.parent.mkdir(parents=True, exist_ok=True)
+        user_input_dir.mkdir(parents=True, exist_ok=True)
         contents = await uploaded.read()
+        # Each job gets its own input/output files so concurrent builds never overwrite each other.
+        upload_id = uuid.uuid4().hex
+        raw_path = user_input_dir / f"roster_{upload_id}.xlsx"
         await run_in_threadpool(raw_path.write_bytes, contents)
+        # Legacy location still read by /api/evaluate_scenarios.
+        await run_in_threadpool((user_input_dir / "uploaded_roster.xlsx").write_bytes, contents)
 
-        out_path = user_output_dir / "LATEST.xlsx"
-        results = await run_in_threadpool(
-            run_full_pipeline,
-            raw_path,
-            out_path,
-            facility,
-            resolve_roster_pickup_coordinates,
-            shift_start_times,
-            shift_filter,
-            return_scenarios=False,
+        job = submit_plan_job(
+            user=user,
+            raw_path=raw_path,
+            job_out_path=user_output_dir / f"roster_{upload_id}.xlsx",
+            latest_out_path=user_output_dir / "LATEST.xlsx",
+            facility=facility,
+            shift_filter=shift_filter,
+            shift_start_times=shift_start_times,
+            uploaded_filename=uploaded.filename or "Uploaded roster.xlsx",
+            pickup_resolver=resolve_roster_pickup_coordinates,
         )
-        all_routes = [route for shift in results for route in shift.get("routes", [])]
-
-        total_b = sum(s.get("buses_used", len(s.get("routes", []))) for s in results)
-        total_k = round(sum(s.get("total_distance_km", 0.0) for s in results), 1)
-        total_p = sum(s.get("assigned_passengers", 0) for s in results)
-        avg_p = round(total_p / total_b, 1) if total_b else 0.0
-        max_r = max((r.get("route_duration_min", 0.0) for r in all_routes), default=0.0)
-        baseline_scenarios_report = {
-            "comparison_table": [
-                {
-                    "scenario_name": "current config",
-                    "description": "Current active configuration (no overrides)",
-                    "buses": total_b,
-                    "total_km": total_k,
-                    "avg_pax_per_bus": avg_p,
-                    "max_ride_min": round(max_r, 1),
-                    "max_first_pickup_before_shift_min": 68.0,
-                    "buses_saved_vs_current": 0,
-                    "near_limit_buses": sum(1 for r in all_routes if r.get("is_near_hard_limit")),
-                    "overrides": {},
-                }
-            ],
-            "scenario_plans": {
-                "current config": {
-                    "shifts": results,
-                    "total_buses": total_b,
-                    "total_km": total_k,
-                }
-            }
-        }
-        scenarios_report = baseline_scenarios_report
-
-        # Automatically archive to history immediately upon generation
-        history_record = None
-        try:
-            from .routes_history import save_roster_history
-            total_emp = sum(s.get("total_employees_in_roster", 0) for s in results)
-            routed_emp = sum(s.get("assigned_passengers", 0) for s in results)
-            archive_data = {
-                "uploaded_file_name": uploaded.filename or "Uploaded roster.xlsx",
-                "total_employees": total_emp or len(all_routes) * 10,
-                "routed_employees": routed_emp or len(all_routes) * 10,
-                "total_routes": len(all_routes),
-                "destination_name": facility.get("name", "Drop-off Facility"),
-                "shifts_summary": results,
-            }
-            res_history = save_roster_history(data=archive_data, user=user)
-            history_record = res_history.get("record")
-        except Exception as hist_err:
-            logger.warning(f"Auto-saving roster history failed: {hist_err}")
-
-        return {
-            "status": "SUCCESS",
-            "shifts": results,
-            "routes": all_routes,
-            "excel_available": out_path.exists(),
-            "excel_filename": "FINAL_OPTIMIZED_BUS_ROSTER.xlsx",
-            "history_record": history_record,
-            "scenarios": scenarios_report,
-        }
+        return JSONResponse(
+            {
+                "status": "QUEUED",
+                "job_id": job["job_id"],
+                "kind": job["kind"],
+                "poll_url": f"/api/plan_jobs/{job['job_id']}",
+            },
+            status_code=202,
+        )
     except Exception as e:
         logger.error(f"Error in /api/plan_multi_shift: {e}", exc_info=True)
         return JSONResponse({"status": "ERROR", "error": str(e)}, status_code=500)
@@ -383,3 +339,59 @@ async def evaluate_scenarios_endpoint(request: Request, user: dict = Depends(req
     except Exception as e:
         logger.error(f"Error in /api/evaluate_scenarios: {e}", exc_info=True)
         return JSONResponse({"status": "ERROR", "error": str(e)}, status_code=500)
+
+
+def _job_response(job_id: str, user: dict, kind: str):
+    from ..jobs.runner import job_store
+    job = job_store.get(job_id, user["id"], kind=kind)
+    if job is None:
+        return JSONResponse(
+            {
+                "status": "ERROR",
+                "error": "Job not found. It may have expired or the server restarted; run it again.",
+            },
+            status_code=404,
+        )
+    return job
+
+
+@router.get("/api/plan_jobs/{job_id}")
+def get_plan_job(job_id: str, user: dict = Depends(require_authenticated_user)):
+    """Status, progress, timings and (when succeeded) the plan result of a plan job."""
+    return _job_response(job_id, user, "plan")
+
+
+@router.post("/api/scenarios/run")
+async def run_scenarios(request: Request, user: dict = Depends(require_authenticated_user)):
+    """Start a scenario job on the same roster, geocoding and start times as a plan job."""
+    from ..jobs.runner import job_store, submit_scenarios_job
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    plan_job_id = str((body or {}).get("plan_job_id") or "").strip() or job_store.latest(user["id"], "plan", "succeeded")
+    if not plan_job_id:
+        return JSONResponse({"status": "ERROR", "error": "Plan routes first; scenarios reuse that plan's roster."}, status_code=400)
+    job = submit_scenarios_job(user, plan_job_id)
+    if job is None:
+        return JSONResponse(
+            {"status": "ERROR", "error": "That plan is not finished or is no longer available; plan routes again."},
+            status_code=409,
+        )
+    return JSONResponse(
+        {
+            "status": "QUEUED",
+            "job_id": job["job_id"],
+            "kind": job["kind"],
+            "plan_job_id": plan_job_id,
+            "poll_url": f"/api/scenarios/{job['job_id']}",
+        },
+        status_code=202,
+    )
+
+
+@router.get("/api/scenarios/{job_id}")
+def get_scenarios_job(job_id: str, user: dict = Depends(require_authenticated_user)):
+    """Status, progress, timings and (when succeeded) the scenario comparison."""
+    return _job_response(job_id, user, "scenarios")

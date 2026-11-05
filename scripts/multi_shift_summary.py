@@ -17,6 +17,7 @@ from backend.app.core.config import config
 from run_route_planner import (
     load_all_verified_stops,
     solve_shift_routes,
+    solver_budget,
     _primary_shift,
     BUS_CAPACITY,
     MAX_RIDE_TIME_SEC,
@@ -84,7 +85,7 @@ def run_all_shifts_report(roster_path: Path, history_mode: str = "ignore"):
             continue
 
         print(f"\n{'#' * 30} SOLVING SHIFT {shift} ({len(shift_emps)} employees, history_mode={history_mode}) {'#' * 30}")
-        res = solve_shift_routes(shift, shift_emps, stop_lookup, facility, plan_history_mode=history_mode)
+        res = solve_shift_routes(shift, shift_emps, stop_lookup, facility, plan_history_mode=history_mode, search_budget=solver_budget("job"))
 
         routes = res.get("routes", [])
         num_buses = res.get("buses_used", 0)

@@ -19,6 +19,8 @@ import datetime
 import json
 import difflib
 import hashlib
+import threading
+import time
 from pathlib import Path
 from typing import Dict, List, Tuple, Any, Optional
 
@@ -63,6 +65,43 @@ def _display_clock(minutes: int) -> str:
 def _display_ampm(minutes: int) -> str:
     hour, minute = (minutes // 60) % 24, minutes % 60
     return f"{hour % 12 or 12:02d}:{minute:02d} {'AM' if hour < 12 else 'PM'}"
+
+
+def solver_budget(kind: str = "interactive") -> Dict[str, Any]:
+    """Search budget for one strategy. 'job' uses the background-job time cap.
+
+    solution_limit (when > 0) is the reproducible budget; time_limit_seconds is a
+    safety cap. A run that stops on the time cap may differ between machines.
+    """
+    time_limit = config.JOB_SOLVER_TIME_LIMIT_SECONDS if kind == "job" else SOLVER_TIME_LIMIT_SECONDS
+    return {
+        "kind": kind,
+        "time_limit_seconds": int(time_limit),
+        "solution_limit": int(config.SOLVER_SOLUTION_LIMIT),
+    }
+
+
+def apply_search_budget(params, budget: Dict[str, Any]):
+    params.time_limit.FromMilliseconds(int(round(float(budget["time_limit_seconds"]) * 1000)))
+    if int(budget.get("solution_limit") or 0) > 0:
+        params.solution_limit = int(budget["solution_limit"])
+    return params
+
+
+def search_stats_entry(strategy: str, solutions: int, elapsed_sec: float, budget: Dict[str, Any], status_code: int) -> Dict[str, Any]:
+    """What one strategy's search actually did, and which limit stopped it."""
+    limit = int(budget.get("solution_limit") or 0)
+    stopped_by = "solution_limit" if limit > 0 and solutions >= limit else "time_limit"
+    return {
+        "strategy": strategy,
+        "solutions": int(solutions),
+        "elapsed_sec": round(elapsed_sec, 2),
+        "stopped_by": stopped_by,
+        "reproducible": stopped_by == "solution_limit",
+        "status": routing_enums_pb2.RoutingSearchStatus.Value.Name(status_code),
+        "solution_limit": limit,
+        "time_limit_seconds": budget["time_limit_seconds"],
+    }
 
 
 def resolve_shift_start_min(shift: str, shift_start_times: Optional[Dict[str, int]] = None) -> int:
@@ -316,12 +355,23 @@ def load_json_cache(file_path: Path) -> dict:
     return {}
 
 
+def write_json_atomic(file_path: Path, data: Any) -> None:
+    """Write JSON via a temp file + rename so concurrent readers never see a partial file."""
+    file_path = Path(file_path)
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = file_path.with_name(f"{file_path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+        os.replace(tmp_path, file_path)
+    finally:
+        if tmp_path.exists():
+            tmp_path.unlink()
+
+
 def save_json_cache(file_path: Path, data: dict):
     try:
-        import json
-        file_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(file_path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
+        write_json_atomic(file_path, data)
     except Exception:
         pass
 
@@ -602,8 +652,7 @@ def save_stored_plan(
         },
         "saved_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
     }
-    with open(plan_path, "w", encoding="utf-8") as f:
-        json.dump(payload, f, indent=2)
+    write_json_atomic(plan_path, payload)
     print(f"[PlanHistory] Saved plan with {len(routes_output)} buses, {total_km:.1f} km to {plan_path.name}")
     return plan_path
 
@@ -970,6 +1019,31 @@ def improve_validated_route_sequences(
     return sorted(candidate_plans.values(), key=score)
 
 
+def solver_transit_matrices(
+    time_matrix: List[List[int]],
+    dist_matrix: List[List[float]],
+    dwell_by_node: List[int],
+    start_node: int,
+    km_weight: float,
+) -> Tuple[List[List[int]], List[List[int]]]:
+    """Node-indexed (time, cost) matrices for OR-Tools.
+
+    time = travel seconds + dwell at the from-node; cost adds KM_WEIGHT * metres.
+    Arcs leaving the virtual start node are free.
+    """
+    n = len(time_matrix)
+    time_m = [[0] * n for _ in range(n)]
+    cost_m = [[0] * n for _ in range(n)]
+    for u in range(n):
+        if u == start_node:
+            continue
+        for v in range(n):
+            travel = int(time_matrix[u][v])
+            time_m[u][v] = travel + dwell_by_node[u]
+            cost_m[u][v] = int(round(travel + dwell_by_node[u] + km_weight * dist_matrix[u][v]))
+    return time_m, cost_m
+
+
 def solve_shift_routes(
     shift: str,
     employees: List[Dict[str, Any]],
@@ -979,8 +1053,10 @@ def solve_shift_routes(
     shift_start_times: Optional[Dict[str, int]] = None,
     plan_history_mode: Optional[str] = None,
     scenario_overrides: Optional[Dict[str, Any]] = None,
+    search_budget: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Solves the multi-bus CVRPTW for a single shift using Google OR-Tools."""
+    budget = search_budget or solver_budget("interactive")
     overrides = scenario_overrides or {}
     local_stop_dwell_sec = float(overrides.get("STOP_DWELL_SECONDS", STOP_DWELL_SECONDS))
     local_boarding_sec_pax = float(overrides.get("BOARDING_SECONDS_PER_PASSENGER", BOARDING_SECONDS_PER_PASSENGER))
@@ -1103,27 +1179,17 @@ def solve_shift_routes(
     routing = pywrapcp.RoutingModel(manager)
 
     # Time callback for Time dimension (pure seconds: travel + dwell)
-    def time_callback(from_index, to_index):
-        u = manager.IndexToNode(from_index)
-        v = manager.IndexToNode(to_index)
-        if u == start_node:
-            return 0
-        dwell = int(round(_stop_dwell_seconds(u, nodes, stop_dwell_sec=local_stop_dwell_sec, boarding_sec_pax=local_boarding_sec_pax))) if u < num_pickups else 0
-        return time_matrix[u][v] + dwell
-
-    # Arc cost callback: travel seconds + dwell + KM_WEIGHT * metres (breaks ties, fuel savings)
-    def arc_cost_callback(from_index, to_index):
-        u = manager.IndexToNode(from_index)
-        v = manager.IndexToNode(to_index)
-        if u == start_node:
-            return 0
-        dwell = int(round(_stop_dwell_seconds(u, nodes, stop_dwell_sec=local_stop_dwell_sec, boarding_sec_pax=local_boarding_sec_pax))) if u < num_pickups else 0
-        travel_sec = time_matrix[u][v]
-        meters = dist_matrix[u][v]
-        return int(round(travel_sec + dwell + KM_WEIGHT * meters))
-
-    cost_callback_index = routing.RegisterTransitCallback(arc_cost_callback)
-    time_callback_index = routing.RegisterTransitCallback(time_callback)
+    # Precomputed node-indexed matrices (same integers the old Python callbacks returned),
+    # registered natively so the search never calls back into Python.
+    dwell_by_node = [
+        int(round(_stop_dwell_seconds(u, nodes, stop_dwell_sec=local_stop_dwell_sec, boarding_sec_pax=local_boarding_sec_pax))) if u < num_pickups else 0
+        for u in range(num_nodes)
+    ]
+    solver_time_matrix, solver_cost_matrix = solver_transit_matrices(
+        time_matrix, dist_matrix, dwell_by_node, start_node, KM_WEIGHT
+    )
+    cost_callback_index = routing.RegisterTransitMatrix(solver_cost_matrix)
+    time_callback_index = routing.RegisterTransitMatrix(solver_time_matrix)
     routing.SetArcCostEvaluatorOfAllVehicles(cost_callback_index)
 
     # Objective weights in seconds
@@ -1143,7 +1209,7 @@ def solve_shift_routes(
     routing.SetFixedCostOfAllVehicles(fixed_bus_cost)
 
     # Capacity Dimension (Hard constraint: max 32 passengers)
-    demand_callback_index = routing.RegisterUnaryTransitCallback(lambda from_idx: nodes[manager.IndexToNode(from_idx)]["demand"])
+    demand_callback_index = routing.RegisterUnaryTransitVector([int(n["demand"]) for n in nodes])
     routing.AddDimensionWithVehicleCapacity(
         demand_callback_index,
         0,
@@ -1198,6 +1264,23 @@ def solve_shift_routes(
     if history_mode == "use":
         stored_result = load_stored_plan(plan_signature, shift, nodes, time_matrix, plant_node, facility)
 
+    # Count solutions per search so each strategy's real work is visible.
+    solution_counter = {"n": 0}
+    routing.AddAtSolutionCallback(lambda: solution_counter.__setitem__("n", solution_counter["n"] + 1))
+    search_stats: List[Dict[str, Any]] = []
+
+    def run_search(name, solve_fn, params):
+        solution_counter["n"] = 0
+        started = time.perf_counter()
+        solution = solve_fn(apply_search_budget(params, budget))
+        stats = search_stats_entry(name, solution_counter["n"], time.perf_counter() - started, budget, routing.status())
+        search_stats.append(stats)
+        print(
+            f"[Search] Shift {shift} {name}: {stats['solutions']} solutions in {stats['elapsed_sec']:.2f}s, "
+            f"stopped by {stats['stopped_by']} (limit {stats['solution_limit'] or 'none'} solutions / {stats['time_limit_seconds']}s), {stats['status']}"
+        )
+        return solution
+
     strategies = [
         ("PARALLEL_CHEAPEST_INSERTION", routing_enums_pb2.FirstSolutionStrategy.PARALLEL_CHEAPEST_INSERTION),
         ("SAVINGS", routing_enums_pb2.FirstSolutionStrategy.SAVINGS),
@@ -1215,8 +1298,11 @@ def solve_shift_routes(
             if assignment:
                 warm_search_params = pywrapcp.DefaultRoutingSearchParameters()
                 warm_search_params.local_search_metaheuristic = routing_enums_pb2.LocalSearchMetaheuristic.GUIDED_LOCAL_SEARCH
-                warm_search_params.time_limit.seconds = SOLVER_TIME_LIMIT_SECONDS
-                warm_sol = routing.SolveFromAssignmentWithParameters(assignment, warm_search_params)
+                warm_sol = run_search(
+                    "WARM_START",
+                    lambda p: routing.SolveFromAssignmentWithParameters(assignment, p),
+                    warm_search_params,
+                )
                 if warm_sol:
                     warm_routes = []
                     for v_id in range(num_vehicles):
@@ -1267,9 +1353,8 @@ def solve_shift_routes(
         search_params = pywrapcp.DefaultRoutingSearchParameters()
         search_params.first_solution_strategy = strat_enum
         search_params.local_search_metaheuristic = routing_enums_pb2.LocalSearchMetaheuristic.GUIDED_LOCAL_SEARCH
-        search_params.time_limit.seconds = SOLVER_TIME_LIMIT_SECONDS
 
-        sol = routing.SolveWithParameters(search_params)
+        sol = run_search(strat_name, routing.SolveWithParameters, search_params)
         if not sol:
             print(f"[Solver] Strategy {strat_name} found no solution.")
             continue
@@ -1610,7 +1695,10 @@ def solve_shift_routes(
                 f"favor {TARGET_RIDE_TIME_MIN:g}-minute target",
                 "minimize road travel time",
             ],
-            "search_limit_seconds": SOLVER_TIME_LIMIT_SECONDS,
+            "search_limit_seconds": budget["time_limit_seconds"],
+            "search_budget": budget,
+            "search_stats": search_stats,
+            "reproducible": all(s["reproducible"] for s in search_stats),
             "post_validation_improvement": "Deterministic 2-opt, cross-route stop relocation and swaps, and feasible bus-retirement search; changed routes revalidated on OSRM",
             "final_route_validation": "OSRM geometry and per-leg durations",
             "candidate_selection": "Best feasible among deterministic local-search candidates validated with OSRM; this is a heuristic, not a proof of global optimality",
@@ -1844,6 +1932,74 @@ def _primary_shift(shift_value: str) -> str:
 
 
 
+def solve_task(task: Dict[str, Any]) -> Dict[str, Any]:
+    """Picklable unit of work: solve one shift (optionally under a scenario).
+
+    Returns the shift result plus how long the solve took, so jobs can report
+    per-shift timings whether they run inline or in a process pool.
+    """
+    started = time.perf_counter()
+    result = solve_shift_routes(**task["kwargs"])
+    return {"label": task["label"], "result": result, "elapsed_sec": round(time.perf_counter() - started, 2)}
+
+
+def run_solve_tasks(tasks: List[Dict[str, Any]], pool=None, on_done=None) -> List[Dict[str, Any]]:
+    """Run solve tasks inline (pool=None) or on an executor; results keep task order.
+
+    on_done(done_count, total, finished) is called after each task completes.
+    """
+    total = len(tasks)
+    if pool is None:
+        outputs = []
+        for task in tasks:
+            outputs.append(solve_task(task))
+            if on_done:
+                on_done(len(outputs), total, outputs[-1])
+        return outputs
+    from concurrent.futures import as_completed
+    futures = {pool.submit(solve_task, task): i for i, task in enumerate(tasks)}
+    outputs: List[Optional[Dict[str, Any]]] = [None] * total
+    for done_count, future in enumerate(as_completed(futures), start=1):
+        outputs[futures[future]] = future.result()
+        if on_done:
+            on_done(done_count, total, outputs[futures[future]])
+    return outputs  # type: ignore[return-value]
+
+
+def employees_for_shift(all_employees: List[Dict[str, Any]], shift: str) -> List[Dict[str, Any]]:
+    return [e for e in all_employees if _primary_shift(e["shift"]) == shift]
+
+
+def shift_solve_tasks(
+    planning_input: Dict[str, Any],
+    facility: Dict[str, Any],
+    shift_start_times: Optional[Dict[str, int]],
+    plan_history_mode: Optional[str],
+    search_budget: Optional[Dict[str, Any]],
+    scenario_overrides: Optional[Dict[str, Any]] = None,
+    label_prefix: str = "",
+) -> List[Dict[str, Any]]:
+    """One solve task per shift, all built from the same parsed roster and geocoding."""
+    return [
+        {
+            "label": f"{label_prefix}{shift}",
+            "shift": shift,
+            "kwargs": {
+                "shift": shift,
+                "employees": employees_for_shift(planning_input["all_employees"], shift),
+                "stop_lookup": planning_input["stop_lookup"],
+                "facility": facility,
+                "resolution_details": planning_input["resolution_details"],
+                "shift_start_times": shift_start_times,
+                "plan_history_mode": plan_history_mode,
+                "scenario_overrides": scenario_overrides or {},
+                "search_budget": search_budget,
+            },
+        }
+        for shift in planning_input["shift_keys"]
+    ]
+
+
 def max_first_pickup_before_shift_min(shift_results: List[Dict[str, Any]]) -> float:
     """Largest gap between a bus's first pickup and its shift start, across all shifts."""
     return max(
@@ -1898,44 +2054,52 @@ def evaluate_all_scenarios(
     shift_filter: str = "ALL",
     scenarios: Optional[List[Dict[str, Any]]] = None,
     baseline_results: Optional[List[Dict[str, Any]]] = None,
+    search_budget: Optional[Dict[str, Any]] = None,
+    pool=None,
+    on_done=None,
 ) -> Dict[str, Any]:
     """Evaluates all scenarios cold across all shifts and computes comparison metrics.
 
     Shift start times stay fixed across scenarios; each scenario's own arrival buffer
     sets its gate deadline. Compliance is always judged against the CURRENT config
     PICKUP_WINDOW_HARD (the client rule), not the scenario's override.
+    Every (scenario, shift) solve is one task, run inline or on `pool`.
     """
     scenario_list = scenarios or load_scenarios()
     comparison_table = []
     scenario_plans: Dict[str, Any] = {}
-    shift_keys = ["A", "B", "C"] if shift_filter == "ALL" else [shift_filter]
+    planning_input = {
+        "all_employees": all_employees,
+        "stop_lookup": stop_lookup,
+        "resolution_details": resolution_details,
+        "shift_keys": ["A", "B", "C"] if shift_filter == "ALL" else [shift_filter],
+    }
     base_buses = 0
 
     print("\n" + "=" * 80)
     print("EVALUATING ALL SCENARIOS (Cold solve, all strategies)")
     print("=" * 80)
 
+    reuse_baseline = baseline_results is not None
+    tasks = []
+    for idx, sc in enumerate(scenario_list):
+        if idx == 0 and reuse_baseline:
+            continue
+        for task in shift_solve_tasks(
+            planning_input, facility, shift_start_times, "ignore", search_budget,
+            scenario_overrides=sc.get("overrides", {}), label_prefix=f"{idx}:",
+        ):
+            tasks.append(task)
+    outputs = run_solve_tasks(tasks, pool=pool, on_done=on_done)
+    results_by_label = {out["label"]: out["result"] for out in outputs}
+
     for idx, sc in enumerate(scenario_list):
         sc_name = sc["name"]
         overrides = sc.get("overrides", {})
-        print(f"\n>>> Running Scenario [{idx+1}/{len(scenario_list)}]: '{sc_name}'")
-
-        if idx == 0 and baseline_results is not None:
+        if idx == 0 and reuse_baseline:
             shift_results = baseline_results
         else:
-            shift_results = [
-                solve_shift_routes(
-                    shift_key,
-                    [e for e in all_employees if _primary_shift(e["shift"]) == shift_key],
-                    stop_lookup,
-                    facility,
-                    resolution_details=resolution_details,
-                    shift_start_times=shift_start_times,
-                    plan_history_mode="ignore",
-                    scenario_overrides=overrides,
-                )
-                for shift_key in shift_keys
-            ]
+            shift_results = [results_by_label[f"{idx}:{shift}"] for shift in planning_input["shift_keys"]]
 
         total_buses = sum(s.get("buses_used", len(s.get("routes", []))) for s in shift_results)
         if idx == 0:
@@ -1964,30 +2128,24 @@ def _filter_roster_to_shift(df: pd.DataFrame, shift_filter: str) -> pd.DataFrame
     return df[df["Shift"].map(_primary_shift) == shift_filter].copy()
 
 
-def run_full_pipeline(
+def prepare_planning_input(
     roster_excel_path: Path,
-    output_excel_path: Path,
-    facility: Optional[Dict[str, Any]] = None,
+    facility: Dict[str, Any],
     pickup_resolver=None,
-    shift_start_times: Optional[Dict[str, int]] = None,
     shift_filter: str = "ALL",
-    plan_history_mode: Optional[str] = None,
-    return_scenarios: bool = False,
-):
+) -> Dict[str, Any]:
+    """Read the roster and resolve pickup stops once.
+
+    The returned dict is reused by the plan job AND the scenario job so both see the
+    same parsed roster and the same geocoding results.
+    """
     shift_filter = str(shift_filter or "ALL").strip().upper()
     if shift_filter != "ALL" and shift_filter not in {"A", "B", "C"}:
         raise ValueError("Choose All shifts or a valid shift.")
-
-    print("=" * 70)
-    print("STARTING MULTI-SHIFT VRP ROUTE PLANNING PIPELINE")
-    print(f"Roster File: {roster_excel_path}")
-    print(f"Output File: {output_excel_path}")
-    print("=" * 70)
-
     # The caller must supply this supervisor's currently confirmed facility.
-    stop_lookup = load_all_verified_stops()
     if not facility or facility.get("lat") is None or facility.get("lon") is None:
         raise ValueError("Choose and confirm a drop-off facility before planning routes.")
+    stop_lookup = load_all_verified_stops()
 
     # Read roster Excel
     df = pd.read_excel(roster_excel_path, header=1)
@@ -2045,25 +2203,52 @@ def run_full_pipeline(
             "mobile": str(r.get("Mob. No.", "")).replace(".0", "").strip(),
         })
 
-    all_results = []
-    shift_keys = ["A", "B", "C"] if shift_filter == "ALL" else [shift_filter]
-    for shift_key in shift_keys:
-        shift_emps = [e for e in all_employees if _primary_shift(e["shift"]) == shift_key]
-        res = solve_shift_routes(shift_key, shift_emps, stop_lookup, facility, resolution_details, shift_start_times, plan_history_mode)
-        all_results.append(res)
+    return {
+        "shift_filter": shift_filter,
+        "shift_keys": ["A", "B", "C"] if shift_filter == "ALL" else [shift_filter],
+        "all_employees": all_employees,
+        "stop_lookup": stop_lookup,
+        "resolution_details": resolution_details,
+        "raw_df": df,
+    }
+
+
+def run_full_pipeline(
+    roster_excel_path: Path,
+    output_excel_path: Path,
+    facility: Optional[Dict[str, Any]] = None,
+    pickup_resolver=None,
+    shift_start_times: Optional[Dict[str, int]] = None,
+    shift_filter: str = "ALL",
+    plan_history_mode: Optional[str] = None,
+    return_scenarios: bool = False,
+    search_budget: Optional[Dict[str, Any]] = None,
+    pool=None,
+):
+    print("=" * 70)
+    print("STARTING MULTI-SHIFT VRP ROUTE PLANNING PIPELINE")
+    print(f"Roster File: {roster_excel_path}")
+    print(f"Output File: {output_excel_path}")
+    print("=" * 70)
+
+    planning_input = prepare_planning_input(roster_excel_path, facility, pickup_resolver, shift_filter)
+    tasks = shift_solve_tasks(planning_input, facility, shift_start_times, plan_history_mode, search_budget)
+    all_results = [out["result"] for out in run_solve_tasks(tasks, pool=pool)]
 
     # Generate Excel with separate sheets for each shift + Raw Data
-    generate_transport_roster_workbook(all_results, output_excel_path, raw_df=df, facility=facility)
+    generate_transport_roster_workbook(all_results, output_excel_path, raw_df=planning_input["raw_df"], facility=facility)
 
     if return_scenarios:
         scenarios_report = evaluate_all_scenarios(
-            all_employees,
-            stop_lookup,
+            planning_input["all_employees"],
+            planning_input["stop_lookup"],
             facility,
-            resolution_details,
+            planning_input["resolution_details"],
             shift_start_times,
-            shift_filter,
+            planning_input["shift_filter"],
             baseline_results=all_results,
+            search_budget=search_budget,
+            pool=pool,
         )
         return all_results, scenarios_report
 

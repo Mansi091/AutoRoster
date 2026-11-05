@@ -147,6 +147,16 @@ class AppConfig:
     ROUTE_SOLVER_TIME_LIMIT_SECONDS: int = max(
         1, min(300, int(os.getenv("ROUTE_SOLVER_TIME_LIMIT_SECONDS", "3")))
     )
+    # Background-job solver budget. The solution limit is the reproducible budget
+    # (same input -> same plan on any machine); the time limit is only a safety cap.
+    JOB_SOLVER_TIME_LIMIT_SECONDS: int = max(
+        1, min(600, int(os.getenv("JOB_SOLVER_TIME_LIMIT_SECONDS", "60")))
+    )
+    SOLVER_SOLUTION_LIMIT: int = max(0, int(os.getenv("SOLVER_SOLUTION_LIMIT", "500")))
+    # Background jobs: shifts solved in parallel per job, jobs run at once, result retention.
+    JOB_SHIFT_POOL_SIZE: int = max(1, int(os.getenv("JOB_SHIFT_POOL_SIZE", "3")))
+    JOB_MAX_CONCURRENT: int = max(1, int(os.getenv("JOB_MAX_CONCURRENT", "1")))
+    JOB_RESULT_TTL_SECONDS: int = max(60, int(os.getenv("JOB_RESULT_TTL_SECONDS", "3600")))
     KM_WEIGHT: float = float(os.getenv("KM_WEIGHT", "0.05"))
     PICKUP_MERGE_RADIUS_METERS: float = float(os.getenv("PICKUP_MERGE_RADIUS_METERS", "400"))
 

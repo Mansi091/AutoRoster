@@ -34,6 +34,11 @@ def create_app() -> FastAPI:
     app.include_router(dropoff_router)
     app.include_router(history_router)
 
+    @app.on_event("shutdown")
+    def stop_job_pools():
+        from .jobs.runner import shutdown_pools
+        shutdown_pools()
+
     static_path = config.ROOT_DIR / "static"
     if static_path.exists():
         app.mount("/static", StaticFiles(directory=static_path), name="static")

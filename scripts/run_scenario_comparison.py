@@ -9,7 +9,7 @@ if str(PROJECT_ROOT) not in sys.path:
 import pandas as pd
 from backend.app.core.config import config, load_scenarios
 from backend.app.etl.transform.coordinate_resolver import resolve_roster_pickup_coordinates
-from run_route_planner import evaluate_all_scenarios, load_all_verified_stops, _filter_roster_to_shift, _primary_shift, solve_shift_routes
+from run_route_planner import solver_budget, evaluate_all_scenarios, load_all_verified_stops, _filter_roster_to_shift, _primary_shift, solve_shift_routes
 
 def main():
     roster_path = PROJECT_ROOT / "tests" / "fixtures" / "sample_roster.xlsx"
@@ -64,6 +64,7 @@ def main():
         shift_start_times=dict(config.SHIFT_START_TIMES),
         shift_filter="ALL",
         scenarios=scenarios,
+        search_budget=solver_budget("job"),
     )
 
     table = report["comparison_table"]
