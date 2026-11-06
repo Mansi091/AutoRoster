@@ -1796,7 +1796,7 @@ export default function App() {
               )}
               <p className="planning-wait">
                 <span className="planning-wait-indicator" aria-hidden="true" />
-                Still working — this screen updates automatically.
+                Still working — this screen updates automatically. Please wait.
                 <span className="planning-elapsed">
                   <Clock3 size={13} /> {Math.floor(planElapsedSeconds / 60)}:{String(planElapsedSeconds % 60).padStart(2, "0")} elapsed
                 </span>
