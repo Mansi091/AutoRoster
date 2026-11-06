@@ -987,6 +987,9 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0
 .dropoff-search-field input { flex: 1; min-width: 0; border: 0; outline: 0; background: transparent; font-size: 14px; color: var(--dark-charcoal); font-family: "Inter", sans-serif; }
 .dropoff-search-field input::placeholder { color: var(--text-4); }
 .dropoff-search-results { display: flex; flex-direction: column; gap: 8px; max-height: 380px; overflow-y: auto; padding-bottom: 4px; }
+.pickup-verify-results { flex: 0 0 auto; max-height: min(200px, 30vh); overflow-y: auto; overscroll-behavior: contain; }
+.pickup-verify-results .dropoff-result-row { flex: 0 0 auto; align-items: flex-start; }
+.pickup-verify-results .dropoff-result-copy strong { overflow-wrap: anywhere; }
 .dropoff-search-message {
   display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 34px 16px;
   text-align: center; font-size: 13px; color: var(--secondary-grey); border: 1px dashed var(--border-strong);

@@ -85,6 +85,39 @@ function parseGoogleMapsLinkOrCoords(query) {
   return null;
 }
 
+function googleMapsRouteSegments(route, destination) {
+  const stops = (route.stops || []).filter((stop) => stop.stop_name);
+  if (!stops.length || !destination?.name) return [];
+
+  const pointFor = (point, name) => {
+    const lat = Number(point.lat);
+    const lon = Number(point.lon);
+    return Number.isFinite(lat) && Number.isFinite(lon) ? `${lat},${lon}` : name;
+  };
+  const points = [
+    ...stops.map((stop) => pointFor(stop, stop.stop_name)),
+    pointFor(destination, destination.name),
+  ];
+  const maxLocationsPerUrl = 11;
+  const segments = [];
+
+  for (let start = 0; start < points.length - 1;) {
+    const end = Math.min(start + maxLocationsPerUrl, points.length);
+    const params = new URLSearchParams({
+      api: "1",
+      origin: points[start],
+      destination: points[end - 1],
+      travelmode: "driving",
+    });
+    const waypoints = points.slice(start + 1, end - 1);
+    if (waypoints.length) params.set("waypoints", waypoints.join("|"));
+    segments.push(`https://www.google.com/maps/dir/?${params.toString()}`);
+    start = end - 1;
+  }
+
+  return segments;
+}
+
 function adaptMultiShiftResponse(shifts, destination) {
   const routes = [];
   const employees = [];
@@ -412,6 +445,7 @@ export default function App() {
       if (data.status === "SUCCESS" && data.shifts) {
         const adapted = adaptMultiShiftResponse(data.shifts, facility);
         setClustering(adapted);
+        setNewlyVerifiedStops(new Set());
         setPlannedRosterFile(file);
         setPlannedShiftStartTimes({ ...shiftStartTimes });
         setStatusMessage("");
@@ -673,6 +707,25 @@ export default function App() {
     return Array.from(map.values());
   }, [clustering]);
 
+  const pickupReviewQueue = useMemo(() => {
+    if (!clustering) return [];
+    const groups = new Map();
+    (clustering.employees || []).forEach((employee) => {
+      if (employee.location_status === "VERIFIED" && !employee.assigned_bus.includes("Outlier")) return;
+      const stopName = employee.pickup_point || employee.raw_stop || "Unknown";
+      if (!groups.has(stopName)) {
+        groups.set(stopName, {
+          stop_name: stopName,
+          employees: [],
+          reason: employee.resolution_reason || "Pickup location needs verification.",
+          representative: employee,
+        });
+      }
+      groups.get(stopName).employees.push(employee);
+    });
+    return Array.from(groups.values());
+  }, [clustering]);
+
   const openVerifyModalForEmployee = (emp) => {
     const stopName = emp.pickup_point || emp.raw_stop || "";
     const matchingEmps = (clustering?.employees || []).filter(
@@ -693,10 +746,10 @@ export default function App() {
     setShowVerifyModal(true);
   };
 
-  const openVerifyModalForFirstUnverified = () => {
-    if (unverifiedStopsList.length > 0) {
-      openVerifyModalForEmployee(unverifiedStopsList[0]);
-    }
+  const showPickupReviewQueue = () => {
+    setActiveTab("employees");
+    setEmployeeStatusFilter("UNVERIFIED");
+    setSearchQuery("");
   };
 
   const goToNextUnverifiedStop = () => {
@@ -708,7 +761,7 @@ export default function App() {
     openVerifyModalForEmployee(unverifiedStopsList[nextIndex]);
   };
 
-  const handleSaveVerifiedCoordinate = async () => {
+  const handleSaveVerifiedCoordinate = async ({ advanceToNext = false } = {}) => {
     if (!verifyingStop || !verifyingStop.stop_name) return;
     const lat = parseFloat(manualVerifyLat);
     const lon = parseFloat(manualVerifyLon);
@@ -772,7 +825,18 @@ export default function App() {
       });
 
       setNewlyVerifiedStops((prev) => new Set([...prev, stopName]));
-      setVerifyStatusMessage(`✅ Verified coordinates saved for "${stopName}"!`);
+      if (advanceToNext) {
+        const nextStop = unverifiedStopsList.find(
+          (employee) => (employee.pickup_point || employee.raw_stop || "Unknown") !== stopName
+        );
+        if (nextStop) {
+          openVerifyModalForEmployee(nextStop);
+        } else {
+          setShowVerifyModal(false);
+        }
+      } else {
+        setShowVerifyModal(false);
+      }
     } catch (err) {
       setVerifyStatusMessage(`Error: ${err.message}`);
     } finally {
@@ -936,6 +1000,11 @@ export default function App() {
     }
     return list;
   }, [clustering, shiftFilter, employeeStatusFilter, searchQuery]);
+
+  const visiblePickupReviewQueue = useMemo(() => pickupReviewQueue
+    .filter((group) => shiftFilter === "ALL" || group.employees.some((employee) => employee.shift?.toUpperCase().includes(shiftFilter)))
+    .filter((group) => !searchQuery.trim() || `${group.stop_name} ${group.employees.map((employee) => employee.employee_name).join(" ")}`.toLowerCase().includes(searchQuery.toLowerCase())),
+  [pickupReviewQueue, shiftFilter, searchQuery]);
 
   const needsShiftTimeRerun = Boolean(
     plannedShiftStartTimes && Object.keys(shiftStartTimes).some((shift) => plannedShiftStartTimes[shift] !== shiftStartTimes[shift])
@@ -1528,7 +1597,7 @@ export default function App() {
 
                 {/* Candidate Search Results */}
                 {verifyCandidates.length > 0 && (
-                  <div className="dropoff-search-results" style={{ maxHeight: "200px" }}>
+                  <div className="dropoff-search-results pickup-verify-results">
                     {verifyCandidates.map((place, idx) => (
                       <article className="dropoff-result-row" key={idx}>
                         <div className="dropoff-result-copy">
@@ -1617,19 +1686,12 @@ export default function App() {
                   </div>
                 )}
 
-                {/* Re-build routes prompt if any stops newly verified */}
+                {/* Saving a stop does not start route optimization; review the rest first. */}
                 {newlyVerifiedStops.size > 0 && (
-                  <div style={{ padding: "12px 16px", borderRadius: "10px", background: "var(--accent-tint)", border: "1px solid var(--accent)", display: "flex", alignItems: "center", justifyContent: "space-between", gap: "10px" }}>
+                  <div style={{ padding: "12px 16px", borderRadius: "10px", background: "var(--accent-tint)", border: "1px solid var(--accent)" }}>
                     <span style={{ fontSize: "13px", color: "var(--accent-ink)", fontWeight: 500 }}>
-                      {newlyVerifiedStops.size} {newlyVerifiedStops.size === 1 ? "stop" : "stops"} newly verified! Re-build routes to assign this employee to a bus route.
+                      Saved {newlyVerifiedStops.size} {newlyVerifiedStops.size === 1 ? "pickup location" : "pickup locations"}. Keep reviewing; route optimization will only run when you choose “Rebuild routes” from the review list.
                     </span>
-                    <button
-                      type="button"
-                      className="btn btn-primary btn-sm"
-                      onClick={() => { setShowVerifyModal(false); runOptimization(); }}
-                    >
-                      <RouteIcon size={14} /> Re-build routes
-                    </button>
                   </div>
                 )}
               </div>
@@ -1642,7 +1704,7 @@ export default function App() {
                       className="btn btn-secondary btn-sm"
                       onClick={goToNextUnverifiedStop}
                     >
-                      Next unverified stop &rarr;
+                      Skip for now &rarr;
                     </button>
                   )}
                 </div>
@@ -1652,12 +1714,32 @@ export default function App() {
                   </button>
                   <button
                     type="button"
-                    className="btn btn-primary"
+                    className="btn btn-secondary"
                     disabled={!manualVerifyLat || !manualVerifyLon || isSavingVerifyCoord}
                     onClick={handleSaveVerifiedCoordinate}
                   >
-                    {isSavingVerifyCoord ? <span className="spinner" /> : <Check size={15} />} Save & Verify Stop
+                    {isSavingVerifyCoord ? <span className="spinner" /> : <Check size={15} />} Save stop
                   </button>
+                  {unverifiedStopsList.length > 1 && (
+                    <button
+                      type="button"
+                      className="btn btn-primary"
+                      disabled={!manualVerifyLat || !manualVerifyLon || isSavingVerifyCoord}
+                      onClick={() => handleSaveVerifiedCoordinate({ advanceToNext: true })}
+                    >
+                      {isSavingVerifyCoord ? <span className="spinner" /> : <Check size={15} />} Save & next stop
+                    </button>
+                  )}
+                  {unverifiedStopsList.length === 1 && (
+                    <button
+                      type="button"
+                      className="btn btn-primary"
+                      disabled={!manualVerifyLat || !manualVerifyLon || isSavingVerifyCoord}
+                      onClick={() => handleSaveVerifiedCoordinate({ advanceToNext: true })}
+                    >
+                      {isSavingVerifyCoord ? <span className="spinner" /> : <Check size={15} />} Save final stop
+                    </button>
+                  )}
                 </div>
               </div>
             </div>
@@ -1730,11 +1812,11 @@ export default function App() {
               <div
                 className={`kpi-detail ${clustering.unverified_employees ? "is-warning" : "is-good"}`}
                 style={clustering.unverified_employees ? { cursor: "pointer", textDecoration: "underline" } : undefined}
-                onClick={clustering.unverified_employees ? openVerifyModalForFirstUnverified : undefined}
+                onClick={clustering.unverified_employees ? showPickupReviewQueue : undefined}
                 title={clustering.unverified_employees ? "Click to verify unmapped stops" : undefined}
               >
                 {clustering.routed_employees} assigned
-                {clustering.unverified_employees > 0 && ` · ${clustering.unverified_employees} need review`}
+                {clustering.unverified_employees > 0 && ` · ${clustering.unverified_employees} employees at ${unverifiedStopsList.length} stops need review`}
               </div>
             </article>
 
@@ -1872,6 +1954,7 @@ export default function App() {
                   const stopCount = route.stops?.length || 0;
                   const passengerCount = Number(route.passengers_assigned) || 0;
                   const loadPct = Math.min(100, Math.round((passengerCount / 32) * 100));
+                  const googleMapsSegments = googleMapsRouteSegments(route, clustering.destination);
                   return (
                     <article key={route.bus_id} className={`route-card ${isOverLimit ? "needs-review" : ""}`}>
                       <div className="route-card-head">
@@ -1916,6 +1999,29 @@ export default function App() {
                           >
                             <MapPin size={14} /> View on map
                           </button>
+                          {googleMapsSegments.length === 1 ? (
+                            <a
+                              className="route-map-link"
+                              href={googleMapsSegments[0]}
+                              target="_blank"
+                              rel="noreferrer"
+                            >
+                              <ExternalLink size={14} /> Open in Google Maps
+                            </a>
+                          ) : googleMapsSegments.length > 1 ? (
+                            <details>
+                              <summary className="route-map-link" style={{ cursor: "pointer" }}>
+                                <ExternalLink size={14} /> Google Maps ({googleMapsSegments.length} parts)
+                              </summary>
+                              <div style={{ display: "flex", flexDirection: "column", gap: 6, paddingTop: 6 }}>
+                                {googleMapsSegments.map((url, index) => (
+                                  <a key={url} href={url} target="_blank" rel="noreferrer">
+                                    Open route part {index + 1}
+                                  </a>
+                                ))}
+                              </div>
+                            </details>
+                          ) : null}
                           <button type="button" className="btn btn-ghost btn-sm" onClick={() => handleRoutePdf(route)}>
                             <FileText size={13} /> PDF
                           </button>
@@ -1976,14 +2082,14 @@ export default function App() {
                     Needs review{unverifiedCount > 0 ? ` (${unverifiedCount})` : ""}
                   </button>
                 </div>
-                {unverifiedCount > 0 && (
+                {unverifiedStopsList.length > 0 && (
                   <button
                     type="button"
                     className="btn btn-warning btn-sm"
-                    onClick={openVerifyModalForFirstUnverified}
+                    onClick={showPickupReviewQueue}
                     style={{ display: "inline-flex", alignItems: "center", gap: "6px" }}
                   >
-                    <MapPin size={13} /> Verify {unverifiedCount} unresolved stops
+                    <MapPin size={13} /> Review {unverifiedStopsList.length} pickup stops
                   </button>
                 )}
               </div>
@@ -1998,6 +2104,65 @@ export default function App() {
                 />
               </div>
             </div>
+
+            {employeeStatusFilter === "UNVERIFIED" && (
+              <section style={{ padding: "16px 18px", borderBottom: "1px solid var(--border)" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, marginBottom: 12 }}>
+                  <div>
+                    <h3 style={{ margin: 0 }}>Pickup stops to review</h3>
+                    <p style={{ margin: "4px 0 0", color: "var(--text-2)", fontSize: 13 }}>
+                      Review each stop once. Saving a location does not run routing; rebuild when you are ready.
+                    </p>
+                  </div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", justifyContent: "flex-end" }}>
+                    <span className={visiblePickupReviewQueue.length ? "pill pill-warn" : "pill pill-ok"}>
+                      {visiblePickupReviewQueue.length} stops left
+                    </span>
+                    {newlyVerifiedStops.size > 0 && (
+                      <button
+                        type="button"
+                        className="btn btn-primary btn-sm"
+                        disabled={isOptimising}
+                        onClick={() => runOptimization()}
+                      >
+                        {isOptimising ? <span className="spinner" /> : <RouteIcon size={14} />}
+                        Rebuild routes ({newlyVerifiedStops.size} saved)
+                      </button>
+                    )}
+                  </div>
+                </div>
+                {visiblePickupReviewQueue.length === 0 ? (
+                  <p style={{ margin: 0, color: "var(--text-2)" }}>
+                    {pickupReviewQueue.length === 0 ? "No pickup stops need review." : "No review stops match these filters."}
+                  </p>
+                ) : (
+                  <div style={{ display: "grid", gap: 8 }}>
+                    {visiblePickupReviewQueue.map((group) => (
+                        <article
+                          key={group.stop_name}
+                          style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, padding: "10px 12px", border: "1px solid var(--border)", borderRadius: 10, background: "var(--bg-card)" }}
+                        >
+                          <div style={{ minWidth: 0 }}>
+                            <strong>{group.stop_name}</strong>
+                            <div style={{ marginTop: 3, color: "var(--text-2)", fontSize: 12 }}>
+                              {group.employees.length} {group.employees.length === 1 ? "employee" : "employees"} · {group.employees.map((employee) => employee.employee_name).join(", ")}
+                            </div>
+                            <div style={{ marginTop: 3, color: "var(--bad)", fontSize: 12 }}>{group.reason}</div>
+                          </div>
+                          <button
+                            type="button"
+                            className="btn btn-warning btn-sm"
+                            onClick={() => openVerifyModalForEmployee(group.representative)}
+                            style={{ flexShrink: 0 }}
+                          >
+                            <MapPin size={13} /> Fix stop
+                          </button>
+                        </article>
+                      ))}
+                  </div>
+                )}
+              </section>
+            )}
 
             <div className="table-scroll">
               {filteredEmployees.length === 0 ? (

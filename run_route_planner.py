@@ -28,6 +28,7 @@ import pandas as pd
 import requests
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.utils import get_column_letter
 from ortools.constraint_solver import pywrapcp, routing_enums_pb2
 from backend.app.core.config import config, load_scenarios
 ROUTE_NEAR_LIMIT_SEC = float(getattr(config, "ROUTE_NEAR_LIMIT_SEC", 120.0))
@@ -1734,16 +1735,25 @@ def generate_transport_roster_workbook(
         bottom=Side(style='thin', color='B2B2B2')
     )
 
-    headers = [
-        "Sr. No.", "Employee Type", "Employee Name", "Shift", "Route Name",
-        "Pickup point", "Mobile No.", "Route No.", "Vehicle Required", "Driver Name",
-        "Driver Contact", "Pickup Time"
+    # Shift-sheet columns in order: (header, width, centered). Pickup Time stays last.
+    shift_columns = [
+        ("Sr. No.", 8, True),
+        ("Employee Type", 15, False),
+        ("Employee Name", 22, False),
+        ("Shift", 10, True),
+        ("Shift Time", 12, True),
+        ("Route Name", 34, False),
+        ("Pickup point", 34, False),
+        ("Mobile No.", 15, True),
+        ("Route No.", 11, True),
+        ("Bus No.", 11, True),
+        ("Vehicle Required", 18, True),
+        ("Driver Name", 16, False),
+        ("Driver Contact", 16, True),
+        ("Pickup Time", 15, True),
     ]
-
-    col_widths = {
-        "A": 8, "B": 15, "C": 22, "D": 10, "E": 34, "F": 34,
-        "G": 15, "H": 11, "I": 18, "J": 16, "K": 16, "L": 15
-    }
+    headers = [name for name, _, _ in shift_columns]
+    last_col = get_column_letter(len(shift_columns))
 
     # ----------------------------------------------------
     # Sheets 1, 2, 3: Separate sheet for EACH SHIFT (Shift A, Shift B, Shift C)
@@ -1765,19 +1775,19 @@ def generate_transport_roster_workbook(
         ws = wb.create_sheet(title=f"Shift {shift_name}")
 
         # Title Block (Rows 1-3)
-        ws.merge_cells("A1:L1")
+        ws.merge_cells(f"A1:{last_col}1")
         ws["A1"] = f"Roster Sheet — Shift {shift_name}"
         ws["A1"].font = title_font
         ws["A1"].fill = gold_fill
         ws["A1"].alignment = Alignment(horizontal="center", vertical="center")
 
-        ws.merge_cells("A2:L2")
+        ws.merge_cells(f"A2:{last_col}2")
         ws["A2"] = f"Drop-off Location: {dropoff_label}"
         ws["A2"].font = sub_title_font
         ws["A2"].fill = gold_fill
         ws["A2"].alignment = Alignment(horizontal="center", vertical="center")
 
-        ws.merge_cells("A3:L3")
+        ws.merge_cells(f"A3:{last_col}3")
         ws["A3"] = "Supervisor Details: ______________________________"
         ws["A3"].font = sub_title_font
         ws["A3"].fill = gold_fill
@@ -1788,6 +1798,10 @@ def generate_transport_roster_workbook(
 
         current_row = 4
         sr_counter = 1
+
+        shift_time = _display_ampm(int(round(shift_res.get(
+            "shift_start_minute_of_day", resolve_shift_start_min(shift_name)
+        ))))
 
         routes = shift_res.get("routes", [])
         for route in routes:
@@ -1814,37 +1828,34 @@ def generate_transport_roster_workbook(
 
                 for emp in stop["employees"]:
                     ws.row_dimensions[current_row].height = 19
-                    row_vals = [
-                        sr_counter,
-                        emp.get("emp_type", "DET"),
-                        emp.get("emp_name", ""),
-                        emp.get("shift", shift_name),
-                        corridor,
-                        stop_name,
-                        emp.get("mobile", ""),
-                        route_num,
-                        veh_no,
-                        driver_name,
-                        driver_mob,
-                        sched_time
-                    ]
+                    row_values = {
+                        "Sr. No.": sr_counter,
+                        "Employee Type": emp.get("emp_type", "DET"),
+                        "Employee Name": emp.get("emp_name", ""),
+                        "Shift": emp.get("shift", shift_name),
+                        "Shift Time": shift_time,
+                        "Route Name": corridor,
+                        "Pickup point": stop_name,
+                        "Mobile No.": emp.get("mobile", ""),
+                        "Route No.": route_num,
+                        "Bus No.": "",
+                        "Vehicle Required": veh_no,
+                        "Driver Name": driver_name,
+                        "Driver Contact": driver_mob,
+                        "Pickup Time": sched_time,
+                    }
 
-                    for col_idx, val in enumerate(row_vals, 1):
-                        cell = ws.cell(row=current_row, column=col_idx, value=val)
+                    for col_idx, (name, _, centered) in enumerate(shift_columns, 1):
+                        cell = ws.cell(row=current_row, column=col_idx, value=row_values[name])
                         cell.font = body_font
                         cell.border = border_thin
-                        if col_idx in [1, 4, 8, 12]:
-                            cell.alignment = Alignment(horizontal="center", vertical="center")
-                        elif col_idx in [7, 9, 11]:
-                            cell.alignment = Alignment(horizontal="center", vertical="center")
-                        else:
-                            cell.alignment = Alignment(horizontal="left", vertical="center")
+                        cell.alignment = Alignment(horizontal="center" if centered else "left", vertical="center")
 
                     sr_counter += 1
                     current_row += 1
 
-        for col_letter, width in col_widths.items():
-            ws.column_dimensions[col_letter].width = width
+        for col_idx, (_, width, _) in enumerate(shift_columns, 1):
+            ws.column_dimensions[get_column_letter(col_idx)].width = width
 
     # ----------------------------------------------------
     # Sheet: "Raw Data" (Original Supervisor input roster)
@@ -2128,6 +2139,45 @@ def _filter_roster_to_shift(df: pd.DataFrame, shift_filter: str) -> pd.DataFrame
     return df[df["Shift"].map(_primary_shift) == shift_filter].copy()
 
 
+def _read_planning_roster(roster_excel_path: Path) -> pd.DataFrame:
+    """Find and normalize roster headers, including generated roster-style title rows."""
+    header_aliases = {
+        "Name": {"name", "employee name", "emp name"},
+        "Shift": {"shift"},
+        "Bus Stop": {"bus stop", "pickup point", "pickup stop", "stop", "stop name"},
+        "GRADE": {"grade", "employee type", "employment type", "type"},
+        "Mob. No.": {"mob no", "mobile", "mobile no", "phone", "contact"},
+    }
+
+    def normalize(value: Any) -> str:
+        return re.sub(r"[^a-z0-9]+", " ", str(value).strip().lower()).strip()
+
+    aliases = {key: {normalize(alias) for alias in values} for key, values in header_aliases.items()}
+    preview = pd.read_excel(roster_excel_path, header=None, nrows=20)
+    header_row = None
+    for row_index, row in preview.iterrows():
+        present = {normalize(value) for value in row if pd.notna(value)}
+        if present & aliases["Name"] and present & aliases["Bus Stop"]:
+            header_row = row_index
+            break
+    if header_row is None:
+        raise ValueError(
+            "Could not find roster headers. Include Employee Name (or Name) and "
+            "Bus Stop (or Pickup point) columns."
+        )
+
+    df = pd.read_excel(roster_excel_path, header=header_row)
+    df = df.dropna(how="all").reset_index(drop=True)
+    columns = {}
+    for column in df.columns:
+        normalized = normalize(column)
+        for canonical, candidates in aliases.items():
+            if normalized in candidates:
+                columns[column] = canonical
+                break
+    return df.rename(columns=columns)
+
+
 def prepare_planning_input(
     roster_excel_path: Path,
     facility: Dict[str, Any],
@@ -2148,8 +2198,7 @@ def prepare_planning_input(
     stop_lookup = load_all_verified_stops()
 
     # Read roster Excel
-    df = pd.read_excel(roster_excel_path, header=1)
-    df = df.dropna(how="all").reset_index(drop=True)
+    df = _read_planning_roster(roster_excel_path)
     planning_df = _filter_roster_to_shift(df, shift_filter)
 
     # Resolve unique roster stop labels missing from the verified stop cache.
