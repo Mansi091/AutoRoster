@@ -733,13 +733,34 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0
   background: linear-gradient(90deg, #D45B63, var(--corporate-red), var(--dark-charcoal)); animation: slide 1.4s ease-in-out infinite;
 }
 .progress-track.is-determinate > span { animation: none; transition: width 0.4s var(--ease); }
+.progress-track.is-active { --progress-position: 0%; --progress-remaining: 100%; }
+.progress-track.is-active > .progress-complete {
+  position: absolute; inset: 0 auto 0 0; border-radius: 99px;
+  background: linear-gradient(90deg, #D45B63, var(--corporate-red));
+  transition: width 0.4s var(--ease);
+}
+.progress-track.is-active > .progress-remaining {
+  position: absolute; inset: 0 auto 0 var(--progress-position); width: var(--progress-remaining);
+  overflow: hidden; border-radius: 99px;
+}
+.progress-track.is-active > .progress-remaining::after {
+  content: ""; position: absolute; inset: 0 auto 0 0; width: 24%; border-radius: 99px;
+  background: linear-gradient(90deg, transparent, var(--corporate-red), transparent);
+  animation: progress-sweep 1.5s ease-in-out infinite;
+}
 .planning-stage { margin: -8px 0 16px; font-size: 13px; color: var(--secondary-grey); }
+.planning-wait { display: flex; align-items: center; gap: 8px; margin: -5px 0 18px; font-size: 12px; color: var(--secondary-grey); flex-wrap: wrap; }
+.planning-wait-indicator { width: 7px; height: 7px; flex: none; border-radius: 50%; background: var(--corporate-red); animation: pulse 1.3s ease-in-out infinite; }
+.planning-elapsed { display: inline-flex; align-items: center; gap: 4px; margin-left: auto; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .planning-details { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .planning-detail { display: flex; flex-direction: column; gap: 2px; padding: 12px 14px; border-radius: var(--r-md); background: var(--light-bg); border: 1px solid var(--border-grey); min-width: 0; }
 .planning-detail span { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: var(--secondary-grey); }
 .planning-detail strong { font-size: 13.5px; font-weight: 600; color: var(--dark-charcoal); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .planning-detail small { font-size: 11.5px; color: var(--secondary-grey); }
-@media (prefers-reduced-motion: reduce) { .progress-track > span, .planning-live { animation: none; } }
+@keyframes progress-sweep { from { transform: translateX(-120%); } to { transform: translateX(450%); } }
+@media (prefers-reduced-motion: reduce) {
+  .progress-track > span, .progress-track.is-active > .progress-remaining::after, .planning-live, .planning-wait-indicator { animation: none; }
+}
 
 /* ==========================================================================
    KPI Summary Cards

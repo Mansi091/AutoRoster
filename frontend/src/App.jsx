@@ -255,6 +255,7 @@ export default function App() {
   const [showScenariosModal, setShowScenariosModal] = useState(false);
   const [isEvaluatingScenarios, setIsEvaluatingScenarios] = useState(false);
   const [planProgress, setPlanProgress] = useState(null);
+  const [planElapsedSeconds, setPlanElapsedSeconds] = useState(0);
   const [scenarioProgress, setScenarioProgress] = useState(null);
   const planJobIdRef = useRef(null);
   const [originalShifts, setOriginalShifts] = useState(null);
@@ -281,6 +282,15 @@ export default function App() {
   const activeUserIdRef = useRef(null);
   const optimizationAbortRef = useRef(null);
   const isSwitchingAccount = Boolean(activeUserIdRef.current && userId && activeUserIdRef.current !== userId);
+
+  useEffect(() => {
+    if (!isPlanning) return undefined;
+    const startedAt = Date.now();
+    const timer = window.setInterval(() => {
+      setPlanElapsedSeconds(Math.floor((Date.now() - startedAt) / 1000));
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [isPlanning]);
 
   // Keep in-memory route data isolated if the active Clerk account changes.
   useEffect(() => {
@@ -415,6 +425,8 @@ export default function App() {
     const abortController = new AbortController();
     optimizationAbortRef.current = abortController;
     setUploadedRosterFile(file);
+    setPlanProgress(null);
+    setPlanElapsedSeconds(0);
     setIsOptimising(true);
     setStatusMessage("");
     try {
@@ -428,7 +440,6 @@ export default function App() {
       }));
       formData.append("shift_filter", effectiveShift);
       formData.append("shift_start_times", JSON.stringify(currentShiftTimes));
-      setPlanProgress(null);
       const queued = await startJob(
         "/api/plan_multi_shift",
         { method: "POST", body: formData, signal: abortController.signal },
@@ -1009,6 +1020,8 @@ export default function App() {
   const needsShiftTimeRerun = Boolean(
     plannedShiftStartTimes && Object.keys(shiftStartTimes).some((shift) => plannedShiftStartTimes[shift] !== shiftStartTimes[shift])
   );
+  const planProgressPercent = Math.min(100, Math.max(0, Number(planProgress?.percent) || 0));
+  const planProgressRemaining = 100 - planProgressPercent;
 
   
   const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
@@ -1752,26 +1765,42 @@ export default function App() {
             <div className="card planning-card">
               <span className="planning-state"><span className="planning-live" /> In progress</span>
               <h2>Optimizing routes</h2>
-              <p className="planning-desc">Assigning employees and calculating road travel times. This can take a little while for large rosters.</p>
+              <p className="planning-desc">
+                {statusMessage || "Assigning employees and calculating road travel times. This can take a little while for large rosters."}
+              </p>
               {planProgress?.total > 0 ? (
                 <>
                   <div
-                    className="progress-track is-determinate"
+                    className="progress-track is-determinate is-active"
                     role="progressbar"
                     aria-label="Route optimization progress"
                     aria-valuemin={0}
                     aria-valuemax={100}
-                    aria-valuenow={planProgress.percent}
+                    aria-valuenow={planProgressPercent}
+                    aria-valuetext={`${planProgress.done} of ${planProgress.total} steps complete`}
+                    style={{
+                      "--progress-position": `${planProgressPercent}%`,
+                      "--progress-remaining": `${planProgressRemaining}%`,
+                    }}
                   >
-                    <span style={{ width: `${Math.max(planProgress.percent, 4)}%` }} />
+                    <span className="progress-complete" style={{ width: `${planProgressPercent}%` }} />
+                    <span className="progress-remaining" />
                   </div>
                   <p className="planning-stage">
-                    {planProgress.stage.charAt(0).toUpperCase() + planProgress.stage.slice(1)} · {planProgress.done} of {planProgress.total} steps
+                    {planProgress.stage ? `${planProgress.stage.charAt(0).toUpperCase()}${planProgress.stage.slice(1)}` : "Processing"}
+                    {" · "}{planProgress.done} of {planProgress.total} steps complete
                   </p>
                 </>
               ) : (
                 <div className="progress-track" role="progressbar" aria-label="Route optimization in progress" aria-valuetext={planProgress?.stage || "In progress"}><span /></div>
               )}
+              <p className="planning-wait">
+                <span className="planning-wait-indicator" aria-hidden="true" />
+                Still working — this screen updates automatically.
+                <span className="planning-elapsed">
+                  <Clock3 size={13} /> {Math.floor(planElapsedSeconds / 60)}:{String(planElapsedSeconds % 60).padStart(2, "0")} elapsed
+                </span>
+              </p>
               <div className="planning-details">
                 <div className="planning-detail">
                   <span>Roster</span>
