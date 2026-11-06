@@ -255,7 +255,6 @@ export default function App() {
   const [showScenariosModal, setShowScenariosModal] = useState(false);
   const [isEvaluatingScenarios, setIsEvaluatingScenarios] = useState(false);
   const [planProgress, setPlanProgress] = useState(null);
-  const [planElapsedSeconds, setPlanElapsedSeconds] = useState(0);
   const [scenarioProgress, setScenarioProgress] = useState(null);
   const planJobIdRef = useRef(null);
   const [originalShifts, setOriginalShifts] = useState(null);
@@ -282,15 +281,6 @@ export default function App() {
   const activeUserIdRef = useRef(null);
   const optimizationAbortRef = useRef(null);
   const isSwitchingAccount = Boolean(activeUserIdRef.current && userId && activeUserIdRef.current !== userId);
-
-  useEffect(() => {
-    if (!isPlanning) return undefined;
-    const startedAt = Date.now();
-    const timer = window.setInterval(() => {
-      setPlanElapsedSeconds(Math.floor((Date.now() - startedAt) / 1000));
-    }, 1000);
-    return () => window.clearInterval(timer);
-  }, [isPlanning]);
 
   // Keep in-memory route data isolated if the active Clerk account changes.
   useEffect(() => {
@@ -426,7 +416,6 @@ export default function App() {
     optimizationAbortRef.current = abortController;
     setUploadedRosterFile(file);
     setPlanProgress(null);
-    setPlanElapsedSeconds(0);
     setIsOptimising(true);
     setStatusMessage("");
     try {
@@ -1794,13 +1783,6 @@ export default function App() {
               ) : (
                 <div className="progress-track" role="progressbar" aria-label="Route optimization in progress" aria-valuetext={planProgress?.stage || "In progress"}><span /></div>
               )}
-              <p className="planning-wait">
-                <span className="planning-wait-indicator" aria-hidden="true" />
-                Still working — this screen updates automatically. Please wait.
-                <span className="planning-elapsed">
-                  <Clock3 size={13} /> {Math.floor(planElapsedSeconds / 60)}:{String(planElapsedSeconds % 60).padStart(2, "0")} elapsed
-                </span>
-              </p>
               <div className="planning-details">
                 <div className="planning-detail">
                   <span>Roster</span>
