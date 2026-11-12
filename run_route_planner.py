@@ -31,6 +31,7 @@ from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 from ortools.constraint_solver import pywrapcp, routing_enums_pb2
 from backend.app.core.config import config, load_scenarios
+from backend.app.db import stop_store
 ROUTE_NEAR_LIMIT_SEC = float(getattr(config, "ROUTE_NEAR_LIMIT_SEC", 120.0))
 from backend.app.etl.transform.candidate_scoring import evaluate_coordinate_candidate
 
@@ -186,10 +187,7 @@ def _stop_dwell_minutes(
 
 
 def _stop_key(name: str) -> str:
-    text = str(name or "").lower()
-    text = re.sub(r"\b(chawk|chouk|chowck)\b", "chowk", text)
-    text = re.sub(r"\b(phatta|fata)\b", "phata", text)
-    return re.sub(r"[^a-z0-9]", "", text)
+    return stop_store.alias_key(name)
 
 
 def _master_match(name: str, lookup: Dict[str, Dict[str, Any]]) -> Optional[Dict[str, Any]]:
@@ -292,24 +290,16 @@ def load_all_verified_stops() -> Dict[str, Dict[str, Any]]:
     """Load cached verified stops and the reviewed pickup master into one lookup."""
     lookup = {}
 
-    # Geocoder-confirmed roster aliases are persisted in the shared physical
-    # stop cache, then reused on later uploads without another API lookup.
-    seed_path = config.MASTER_STOPS_FILE
-    if seed_path.exists():
-        try:
-            with seed_path.open("r", encoding="utf-8") as seed_file:
-                seeded_stops = json.load(seed_file)
-            if isinstance(seeded_stops, dict):
-                for name, coords in seeded_stops.items():
-                    try:
-                        lat, lon = float(coords[0]), float(coords[1])
-                    except (TypeError, ValueError, IndexError):
-                        continue
-                    key = _stop_key(name)
-                    if key:
-                        lookup[key] = {"name": str(name).strip(), "lat": lat, "lon": lon}
-        except Exception as exc:
-            print(f"[Stop cache] Could not load cached verified stops: {exc}")
+    # Stop memory: Supabase, else its last local copy, else the seed file.
+    records, source = stop_store.load_stop_records()
+    for record in records:
+        key = _stop_key(record["alias_text"])
+        if key:
+            lookup[key] = {
+                "name": record["name"], "lat": float(record["lat"]), "lon": float(record["lon"]),
+                "quality": record.get("quality", "approximate"), "stop_id": record.get("stop_id"),
+            }
+    print(f"[Stop memory] {len(records)} stop spellings loaded from {source}.")
 
     # Pickup point master (authoritative Excel repository of verified coordinates & proper spaced names)
     master_path = config.DATA_DIR / "manual" / "pickup_point_master.xlsx"
@@ -1931,15 +1921,55 @@ def generate_transport_roster_workbook(
     print(f"\n[Workbook Generated] Saved full multi-shift transport roster to:\n  {output_path}")
 
 
-def _primary_shift(shift_value: str) -> str:
-    shift_text = str(shift_value).upper()
-    if "A" in shift_text:
-        return "A"
-    if "B" in shift_text:
-        return "B"
-    if "C" in shift_text:
-        return "C"
-    return "A"
+def configured_shifts() -> List[str]:
+    """Shift codes in the order of the working day, from config."""
+    return list(config.SHIFT_START_TIMES.keys())
+
+
+def shift_text(shift_value: Any) -> str:
+    """Roster shift cell as display text ('' when blank)."""
+    if shift_value is None or (isinstance(shift_value, float) and math.isnan(shift_value)):
+        return ""
+    text = str(shift_value).strip()
+    return "" if text.lower() == "nan" else text
+
+
+def parse_shift(shift_value: Any) -> Optional[str]:
+    """Which shift a roster value belongs to, or None if blank/unrecognised.
+
+    Shift codes must appear as whole words ("A", "Shift B", "B (Day)").
+    Combined values such as "A + B" or "A+B+C" go to the earliest of the listed
+    shifts in the configured order (so "A + B" -> A).
+    """
+    tokens = set(re.findall(r"[A-Z0-9]+", shift_text(shift_value).upper()))
+    listed = [code for code in configured_shifts() if code.upper() in tokens]
+    return listed[0] if listed else None
+
+
+def _primary_shift(shift_value: Any) -> Optional[str]:
+    return parse_shift(shift_value)
+
+
+def unrecognised_shift_reason(shift_value: Any) -> str:
+    value = shift_text(shift_value)
+    expected = ", ".join(configured_shifts())
+    if not value:
+        return f"No shift given in roster (expected one of {expected}); add the shift and re-run."
+    return f"Shift value '{value}' is not recognised (expected one of {expected}); correct the shift and re-run."
+
+
+def attach_unrecognised_shift_employees(
+    results: List[Dict[str, Any]], employees: List[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+    """Report employees with no usable shift under the first planned shift's outliers."""
+    if not employees or not results:
+        return results
+    first = dict(results[0])
+    first["outliers"] = list(first.get("outliers", [])) + [
+        {**emp, "reason": unrecognised_shift_reason(emp.get("shift"))} for emp in employees
+    ]
+    first["total_employees_in_roster"] = first.get("total_employees_in_roster", 0) + len(employees)
+    return [first] + list(results[1:])
 
 
 
@@ -2132,11 +2162,13 @@ def evaluate_all_scenarios(
 
 
 def _filter_roster_to_shift(df: pd.DataFrame, shift_filter: str) -> pd.DataFrame:
+    """Rows for the chosen shift, plus rows with no usable shift (they are reported)."""
     if shift_filter == "ALL":
         return df
     if "Shift" not in df.columns:
-        return df if shift_filter == "A" else df.iloc[0:0]
-    return df[df["Shift"].map(_primary_shift) == shift_filter].copy()
+        return df.iloc[0:0]
+    parsed = df["Shift"].map(parse_shift)
+    return df[(parsed == shift_filter) | parsed.isna()].copy()
 
 
 def _read_planning_roster(roster_excel_path: Path) -> pd.DataFrame:
@@ -2199,6 +2231,8 @@ def prepare_planning_input(
 
     # Read roster Excel
     df = _read_planning_roster(roster_excel_path)
+    if "Shift" not in df.columns:
+        raise ValueError("Could not find a Shift column in the roster. Add a Shift column (A, B or C) and upload again.")
     planning_df = _filter_roster_to_shift(df, shift_filter)
 
     # Resolve unique roster stop labels missing from the verified stop cache.
@@ -2247,7 +2281,7 @@ def prepare_planning_input(
             "sr_no": idx + 1,
             "emp_type": str(r.get("GRADE", "DET")).strip(),
             "emp_name": str(r.get("Name", f"Emp_{idx+1}")).strip(),
-            "shift": str(r.get("Shift", "A")).strip(),
+            "shift": shift_text(r.get("Shift")),
             "raw_stop": str(r.get("Bus Stop", "")).strip(),
             "mobile": str(r.get("Mob. No.", "")).replace(".0", "").strip(),
         })
@@ -2256,6 +2290,7 @@ def prepare_planning_input(
         "shift_filter": shift_filter,
         "shift_keys": ["A", "B", "C"] if shift_filter == "ALL" else [shift_filter],
         "all_employees": all_employees,
+        "unrecognised_shift_employees": [e for e in all_employees if parse_shift(e["shift"]) is None],
         "stop_lookup": stop_lookup,
         "resolution_details": resolution_details,
         "raw_df": df,
@@ -2282,7 +2317,10 @@ def run_full_pipeline(
 
     planning_input = prepare_planning_input(roster_excel_path, facility, pickup_resolver, shift_filter)
     tasks = shift_solve_tasks(planning_input, facility, shift_start_times, plan_history_mode, search_budget)
-    all_results = [out["result"] for out in run_solve_tasks(tasks, pool=pool)]
+    all_results = attach_unrecognised_shift_employees(
+        [out["result"] for out in run_solve_tasks(tasks, pool=pool)],
+        planning_input["unrecognised_shift_employees"],
+    )
 
     # Generate Excel with separate sheets for each shift + Raw Data
     generate_transport_roster_workbook(all_results, output_excel_path, raw_df=planning_input["raw_df"], facility=facility)

@@ -173,6 +173,13 @@ class AppConfig:
 
     # File Paths
     MASTER_STOPS_FILE: Path = SEED_DIR / "stops_seed.json"
+    # Pickup stop memory (Supabase): local copy used when Supabase is unreachable,
+    # how long a loaded stop list is reused, and the request timeout.
+    STOP_STORE_CACHE_FILE: Path = CACHE_DIR / "pickup_stops_cache.json"
+    STOP_STORE_TTL_SECONDS: float = float(os.getenv("STOP_STORE_TTL_SECONDS", "60"))
+    STOP_STORE_TIMEOUT_SECONDS: float = float(os.getenv("STOP_STORE_TIMEOUT_SECONDS", "10"))
+    # Two saved points for the same stop name closer than this are treated as one place.
+    STOP_SAME_PLACE_METERS: float = float(os.getenv("STOP_SAME_PLACE_METERS", "50"))
     GEOAPIFY_CACHE_FILE: Path = CACHE_DIR / "geoapify_cache.json"
     LLM_CACHE_FILE: Path = CACHE_DIR / "llm_corrections_cache.json"
 

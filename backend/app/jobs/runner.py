@@ -161,6 +161,7 @@ def submit_plan_job(
 
     def work(record):
         from run_route_planner import (
+            attach_unrecognised_shift_employees,
             generate_transport_roster_workbook,
             prepare_planning_input,
             run_solve_tasks,
@@ -191,7 +192,9 @@ def submit_plan_job(
             shift_pool_size=config.JOB_SHIFT_POOL_SIZE,
             search_budget=budget,
         )
-        results = [out["result"] for out in outputs]
+        results = attach_unrecognised_shift_employees(
+            [out["result"] for out in outputs], planning_input["unrecognised_shift_employees"]
+        )
         all_routes = [route for shift in results for route in shift.get("routes", [])]
 
         job_store.set_progress(job_id, "writing workbook", len(tasks), total)

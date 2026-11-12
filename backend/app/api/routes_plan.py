@@ -70,7 +70,10 @@ def save_coordinate(data: dict, user: dict = Depends(require_authenticated_user)
         try:
             lat, lon = float(lat), float(lon)
             location_status, reason = evaluate_coordinate_candidate(lat, lon, facility=facility)
-            saved = location_status == "VERIFIED" and stops_repo.save_stop(stop_name, lat, lon)
+            saved = location_status == "VERIFIED" and stops_repo.save_stop(
+                stop_name, lat, lon, quality="confirmed", source="pin placed by supervisor",
+                changed_by=user.get("email") or user.get("id", ""),
+            )
         except (TypeError, ValueError):
             saved = False
         if saved:
@@ -126,7 +129,10 @@ def resolve_single(data: dict, user: dict = Depends(require_authenticated_user))
             try:
                 latitude, longitude = float(lat), float(lon)
                 location_status, reason = evaluate_coordinate_candidate(latitude, longitude, facility=facility)
-                saved = location_status == "VERIFIED" and stops_repo.save_stop(stop_name, latitude, longitude)
+                saved = location_status == "VERIFIED" and stops_repo.save_stop(
+                    stop_name, latitude, longitude, quality="confirmed", source="pin placed by supervisor",
+                    changed_by=user.get("email") or user.get("id", ""),
+                )
             except (TypeError, ValueError):
                 saved = False
             if saved:

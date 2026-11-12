@@ -206,16 +206,21 @@ def resolve_roster_pickup_coordinates(
     # serial request per roster row; results are persisted only after workers end.
     with ThreadPoolExecutor(max_workers=4) as executor:
         resolved = dict(executor.map(resolve_one, unresolved_names))
-    resolved = {**master_results, **resolved}
-
+    # Only newly found stops are saved; stops already in memory are not re-written.
     for raw_name, item in resolved.items():
         if item.get("location_status") == "VERIFIED":
-            if not stops_repo.save_stop(raw_name, item["latitude"], item["longitude"]):
+            if not stops_repo.save_stop(
+                raw_name, item["latitude"], item["longitude"], quality="approximate",
+                source="map search: Geoapify and LocationIQ agreed", changed_by="automatic",
+            ):
                 item["location_status"] = "LOCATION_UNVERIFIED"
                 item["resolution_reason"] = "Resolved coordinates could not be saved to the verified stop cache."
                 item["latitude"] = None
                 item["longitude"] = None
                 continue
             logger.info("Resolved new roster pickup stop via geocoding providers: %s", raw_name)
+        else:
+            # Keep it on the permanent "needs location" list until a search or a pin places it.
+            stops_repo.mark_needs_location(raw_name, item.get("resolution_reason") or "Could not be placed on the map.")
 
-    return resolved
+    return {**master_results, **resolved}
