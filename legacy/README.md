@@ -209,3 +209,17 @@ Generates intermediate supervisor audit workbooks inside `output/`.
 * **Algorithms:** Proximity-based same-shift grouping, 32-seat hard cap, 60-minute ride target / 70-minute maximum, passenger ride-time weighted Dijkstra pickup ordering (up to 14 stops), 2-opt refinement for larger routes, OSRM no-traffic road-time matrix
 * **Backend / Scripting:** Python 3.13, Flask, Pandas, OpenPyXL
 * **Environment:** `uv` (with `pyproject.toml` + `uv.lock` for reproducible installs)
+
+## Moved here during cleanup (2026-11-12)
+
+None of these are used by the app, the tests in `tests/` or the scripts in `scripts/`.
+
+* `root_old/` - older versions of `create_final_bus_roster.py` and `generate_route_stops.py`
+  from the pre-OR-Tools pipeline (the copies directly in `legacy/` are different, also old, versions).
+* `root_tests/` - one-off check scripts that used to sit in the project root. They are not
+  part of the test suite and some no longer run against the current planner.
+* `local_scratch/` - personal experiment scripts. Ignored by git, so they exist only on the
+  machine where they were written.
+
+`clean_stops_llm.py` and `run_pipeline.py` were removed from the root because identical
+copies already live in `legacy/`.
